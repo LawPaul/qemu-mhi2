@@ -163,6 +163,12 @@ static void tegra30_i2c_packet_fill_rx(Tegra30I2CState *s)
 static void tegra30_i2c_packet_tx(Tegra30I2CState *s, uint32_t value)
 {
     s->packet_seen = true;
+    I2C_DBG(s, "master FIFO value=%08x header_words=%u discard=%u",
+            value, s->packet_words, s->packet_discard);
+    if (s->packet_discard) {
+        s->packet_discard -= MIN(s->packet_discard, 4);
+        return;
+    }
     if (s->packet_words < 3) {
         s->packet_header[s->packet_words++] = value;
         if (s->packet_words != 3) {
@@ -176,6 +182,8 @@ static void tegra30_i2c_packet_tx(Tegra30I2CState *s, uint32_t value)
                 (value >> 1) & 0x7f, s->packet_read, s->packet_remaining);
         if (i2c_start_transfer(s->bus, (value >> 1) & 0x7f, s->packet_read)) {
             s->int_status |= 8;
+            /* Payload already queued after a NACK is not a new header. */
+            s->packet_discard = s->packet_read ? 0 : s->packet_remaining;
             s->packet_remaining = 0;
             tegra30_i2c_packet_done(s);
         } else if (s->packet_read) {
@@ -208,6 +216,11 @@ static uint64_t tegra30_i2c_read(void *opaque, hwaddr offset,
     }
 
     switch (offset) {
+    case 0x8c: /* T124 CONFIG_LOAD: configuration is applied synchronously. */
+        if (s->tegra124) {
+            return 0;
+        }
+        return s->regs[offset / sizeof(uint32_t)];
     case 0x54: {
         uint32_t word = 0;
         for (unsigned i = 0; i < 4 && s->rx_pos < s->rx_count; i++) {
@@ -332,6 +345,17 @@ static void tegra30_i2c_write(void *opaque, hwaddr offset,
     }
 
     switch (offset) {
+    case 0x8c:
+        if (s->tegra124) {
+            if (value & ~7u) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "tegra124-i2c: reserved CONFIG_LOAD bits "
+                              "0x%" PRIx64 "\n", value);
+            }
+        } else {
+            s->regs[offset / sizeof(uint32_t)] = value;
+        }
+        break;
     case I2C_CNFG_OFFSET:
         s->cnfg = value;
         if (s->cnfg & I2C_CNFG_SEND) {
@@ -413,6 +437,7 @@ static void tegra30_i2c_write(void *opaque, hwaddr offset,
             s->rx_count = s->rx_pos = 0;
         }
         if (value & 2) {
+            s->packet_discard = 0;
             s->packet_words = s->packet_remaining = 0;
             s->packet_active = false;
             i2c_end_transfer(s->bus);
@@ -468,6 +493,7 @@ static void tegra30_i2c_reset(DeviceState *dev)
     }
     qemu_set_irq(s->irq, 0);
     s->packet_words = s->packet_remaining = 0;
+    s->packet_discard = 0;
     s->rx_count = s->rx_pos = 0;
     s->packet_seen = s->packet_active = s->packet_read = false;
     memset(s->packet_header, 0, sizeof(s->packet_header));
@@ -513,7 +539,8 @@ static void tegra30_i2c_realize(DeviceState *dev, Error **errp)
     sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
 
     memory_region_init_io(&s->iomem, OBJECT(dev), &tegra30_i2c_ops, s,
-                          TYPE_TEGRA30_I2C, TEGRA30_I2C_IOSIZE);
+                          object_get_typename(OBJECT(dev)),
+                          s->tegra124 ? 0x100 : TEGRA30_I2C_IOSIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
 
     s->bus = i2c_init_bus(dev, NULL);
@@ -522,10 +549,11 @@ static void tegra30_i2c_realize(DeviceState *dev, Error **errp)
 
 static const VMStateDescription tegra30_i2c_vmstate = {
     .name = "tegra30-i2c",
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_BOOL_V(reset_asserted, Tegra30I2CState, 3),
+        VMSTATE_UINT32_V(packet_discard, Tegra30I2CState, 4),
         VMSTATE_UINT32_ARRAY(packet_header, Tegra30I2CState, 3),
         VMSTATE_UINT32(packet_words, Tegra30I2CState),
         VMSTATE_UINT32(packet_remaining, Tegra30I2CState),
@@ -578,9 +606,21 @@ static const TypeInfo tegra30_i2c_info = {
     .class_init    = tegra30_i2c_class_init,
 };
 
+static void tegra124_i2c_init(Object *obj)
+{
+    TEGRA30_I2C(obj)->tegra124 = true;
+}
+
+static const TypeInfo tegra124_i2c_info = {
+    .name = TYPE_TEGRA124_I2C,
+    .parent = TYPE_TEGRA30_I2C,
+    .instance_init = tegra124_i2c_init,
+};
+
 static void tegra30_i2c_register(void)
 {
     type_register_static(&tegra30_i2c_info);
+    type_register_static(&tegra124_i2c_info);
 }
 
 type_init(tegra30_i2c_register)

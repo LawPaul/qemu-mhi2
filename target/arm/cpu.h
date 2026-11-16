@@ -507,6 +507,7 @@ typedef struct CPUArchState {
         uint32_t c15_diagnostic; /* diagnostic register */
         uint32_t c15_power_diagnostic;
         uint32_t c15_power_control; /* power control */
+        uint32_t l2ectlr;
         uint64_t dbgbvr[16]; /* breakpoint value registers */
         uint64_t dbgbcr[16]; /* breakpoint control registers */
         uint64_t dbgwvr[16]; /* watchpoint value registers */
@@ -991,6 +992,8 @@ struct ArchCPU {
     qemu_irq gicv3_maintenance_interrupt;
     /* GPIO output for the PMU interrupt */
     qemu_irq pmu_interrupt;
+    qemu_irq l2_axi_error;
+    bool has_l2_axi_error;
 
     /* MemoryRegion to use for secure physical accesses */
     MemoryRegion *secure_memory;

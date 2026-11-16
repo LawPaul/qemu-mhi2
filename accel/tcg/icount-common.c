@@ -47,6 +47,8 @@
 static bool icount_sleep = true;
 /* Arbitrarily pick 1MIPS as the minimum allowable speed.  */
 #define MAX_ICOUNT_SHIFT 10
+/* Negative fixed shifts execute 2^-shift instructions per nanosecond. */
+#define MIN_ICOUNT_SHIFT -3
 
 bool icount_align_option;
 
@@ -155,7 +157,8 @@ int64_t icount_get(void)
 
 int64_t icount_to_ns(int64_t icount)
 {
-    return icount << qatomic_read(&timers_state.icount_time_shift);
+    int shift = qatomic_read(&timers_state.icount_time_shift);
+    return shift >= 0 ? icount << shift : icount >> -shift;
 }
 
 /*
@@ -201,8 +204,7 @@ static void icount_adjust(void)
     }
     timers_state.last_delta = delta;
     qatomic_set(&timers_state.qemu_icount_bias,
-                cur_icount - (timers_state.qemu_icount
-                              << timers_state.icount_time_shift));
+                cur_icount - icount_to_ns(timers_state.qemu_icount));
     seqlock_write_unlock(&timers_state.vm_clock_seqlock,
                          &timers_state.vm_clock_lock);
 }
@@ -225,6 +227,9 @@ static void icount_adjust_vm(void *opaque)
 int64_t icount_round(int64_t count)
 {
     int shift = qatomic_read(&timers_state.icount_time_shift);
+    if (shift < 0) {
+        return count > INT64_MAX >> -shift ? INT64_MAX : count << -shift;
+    }
     return (count + (1 << shift) - 1) >> shift;
 }
 
@@ -420,7 +425,8 @@ bool icount_configure(QemuOpts *opts, Error **errp)
     const char *option = qemu_opt_get(opts, "shift");
     bool sleep = qemu_opt_get_bool(opts, "sleep", true);
     bool align = qemu_opt_get_bool(opts, "align", false);
-    long time_shift = -1;
+    long time_shift = 0;
+    bool fixed_shift = false;
 
     if (!option) {
         if (qemu_opt_get(opts, "align") != NULL) {
@@ -437,10 +443,11 @@ bool icount_configure(QemuOpts *opts, Error **errp)
 
     if (strcmp(option, "auto") != 0) {
         if (qemu_strtol(option, NULL, 0, &time_shift) < 0
-            || time_shift < 0 || time_shift > MAX_ICOUNT_SHIFT) {
+            || time_shift < MIN_ICOUNT_SHIFT || time_shift > MAX_ICOUNT_SHIFT) {
             error_setg(errp, "icount: Invalid shift value");
             return false;
         }
+        fixed_shift = true;
     } else if (icount_align_option) {
         error_setg(errp, "shift=auto and align=on are incompatible");
         return false;
@@ -457,7 +464,7 @@ bool icount_configure(QemuOpts *opts, Error **errp)
 
     icount_align_option = align;
 
-    if (time_shift >= 0) {
+    if (fixed_shift) {
         timers_state.icount_time_shift = time_shift;
         icount_enable_precise();
         return true;

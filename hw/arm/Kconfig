@@ -743,6 +743,42 @@ config MHI2_HARMAN
     default y
     depends on TEGRA30
     select MMX_IOC
+    select GLBRIDGE
+
+config MH2P
+    bool
+    default y
+    depends on TCG && ARM
+    select A15MPCORE
+    select GLBRIDGE
+    select MH2P_PCIE_SIDEBAND
+    select PFLASH_CFI02
+    select SERIAL
+    select SDHCI
+    select TEGRA30_GPIO
+    select TEGRA30_I2C
+    select TEGRA30_SNOR
+    select TEGRA30_TIMER
+    select TEGRA124_SPI
+
+config MH2P_RCC
+    bool
+    default y
+    depends on TCG && ARM
+    select A15MPCORE
+    select ARM_V7M
+    select CAN_BUS
+    select MH2P_PCIE_SIDEBAND
+    select SERIAL
+    select DRA7_GPIO
+    select DRA7_I2C
+    select AT24C
+    select DRA7_MCSPI
+    select TJA1145
+    select LIS331DLH
+    select OMAP4_MAILBOX
+    select USB_DWC3
+    select PFLASH_CFI02
 
 config AXIADO_SOC
     bool

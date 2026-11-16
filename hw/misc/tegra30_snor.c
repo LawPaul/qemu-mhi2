@@ -45,6 +45,14 @@ enum {
 #define SNOR_STA_DEVICE_BSY     (1u << 31)
 #define SNOR_STA_SLAVE_DONE     (1u << 30)  /* transfer-done status */
 
+static void tegra30_snor_update_irq(Tegra30SnorState *s)
+{
+    uint32_t cfg = s->regs[SNOR_DMA_CFG / 4];
+
+    qemu_set_irq(s->irq, (cfg & SNOR_DMA_CFG_IE_DMA_DONE) &&
+                         (cfg & SNOR_DMA_CFG_IS_DMA_DONE));
+}
+
 static void tegra30_snor_do_dma(Tegra30SnorState *s)
 {
     uint32_t nor_addr = s->regs[SNOR_NOR_ADDR / 4];
@@ -55,11 +63,20 @@ static void tegra30_snor_do_dma(Tegra30SnorState *s)
     uint32_t len = words * 4;
     g_autofree uint8_t *buf = g_malloc(len);
 
-    /* NOR window -> system memory copy via the global system address space. */
-    dma_memory_read(&address_space_memory, nor_addr, buf, len,
-                    MEMTXATTRS_UNSPECIFIED);
-    dma_memory_write(&address_space_memory, ahb_addr, buf, len,
-                     MEMTXATTRS_UNSPECIFIED);
+    s->regs[SNOR_DMA_CFG / 4] &= ~SNOR_DMA_CFG_IS_DMA_DONE;
+    s->regs[SNOR_STATUS / 4] &= ~SNOR_STA_SLAVE_DONE;
+    tegra30_snor_update_irq(s);
+
+    if (dma_memory_read(&address_space_memory, nor_addr, buf, len,
+                        MEMTXATTRS_UNSPECIFIED) != MEMTX_OK ||
+        dma_memory_write(&address_space_memory, ahb_addr, buf, len,
+                         MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+        qemu_log_mask(LOG_GUEST_ERROR, "tegra30-snor: failed DMA "
+                      "0x%08x -> 0x%08x (%u bytes)\n", nor_addr, ahb_addr, len);
+        s->regs[SNOR_CONFIG / 4] &= ~SNOR_CONFIG_GO;
+        s->regs[SNOR_DMA_CFG / 4] &= ~(SNOR_DMA_CFG_GO | SNOR_DMA_CFG_BSY);
+        return;
+    }
 
     /* Transfer completed synchronously: clear the GO/BSY bits, advance ptrs. */
     s->regs[SNOR_CONFIG / 4]  &= ~SNOR_CONFIG_GO;
@@ -78,9 +95,7 @@ static void tegra30_snor_do_dma(Tegra30SnorState *s)
     s->regs[SNOR_DMA_CFG / 4] |= SNOR_DMA_CFG_IS_DMA_DONE;
     s->regs[SNOR_STATUS / 4] = (s->regs[SNOR_STATUS / 4] & ~SNOR_STA_DEVICE_BSY)
                                | SNOR_STA_SLAVE_DONE;
-    if (dma_cfg & SNOR_DMA_CFG_IE_DMA_DONE) {
-        qemu_irq_raise(s->irq);
-    }
+    tegra30_snor_update_irq(s);
 }
 
 static uint64_t tegra30_snor_read(void *opaque, hwaddr offset, unsigned size)
@@ -115,9 +130,7 @@ static void tegra30_snor_write(void *opaque, hwaddr offset, uint64_t val,
             cur &= ~SNOR_DMA_CFG_IS_DMA_DONE;     /* acknowledge */
         }
         s->regs[SNOR_DMA_CFG / 4] = newv | (cur & SNOR_DMA_CFG_IS_DMA_DONE);
-        if (!(s->regs[SNOR_DMA_CFG / 4] & SNOR_DMA_CFG_IS_DMA_DONE)) {
-            qemu_irq_lower(s->irq);
-        }
+        tegra30_snor_update_irq(s);
         return;
     }
 
@@ -151,6 +164,7 @@ static void tegra30_snor_reset(DeviceState *dev)
     Tegra30SnorState *s = TEGRA30_SNOR(dev);
 
     memset(s->regs, 0, sizeof(s->regs));
+    tegra30_snor_update_irq(s);
 }
 
 static void tegra30_snor_init(Object *obj)

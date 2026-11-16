@@ -5951,7 +5951,19 @@ static bool trans_CPS(DisasContext *s, arg_CPS *a)
         mask |= CPSR_M;
         val |= a->mode;
     }
-    if (mask) {
+    if (mask == CPSR_I) {
+        TCGv_i64 daif = tcg_temp_new_i64();
+
+        /* IRQ masking has no security checks or cached hflags to update. */
+        tcg_gen_ld_i64(daif, tcg_env, offsetof(CPUARMState, daif));
+        if (val) {
+            tcg_gen_ori_i64(daif, daif, CPSR_I);
+        } else {
+            tcg_gen_andi_i64(daif, daif, ~((uint64_t)CPSR_I));
+        }
+        tcg_gen_st_i64(daif, tcg_env, offsetof(CPUARMState, daif));
+        gen_lookup_tb(s);
+    } else if (mask) {
         gen_set_psr_im(s, mask, 0, val);
     }
     return true;

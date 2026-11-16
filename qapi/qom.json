@@ -259,6 +259,22 @@
   'allow-preconfig': true }
 
 ##
+# @CanHostChardevProperties:
+#     Properties for the local fork's diagnostic CAN stream peer.
+#
+# @chardev: character device ID carrying 16-byte CAN records:
+#     little-endian identifier with QEMU CAN flags, DLC byte,
+#     three zero padding bytes and eight payload bytes
+#
+# @canbus: object ID of the CAN bus to connect
+#
+# Since: 11.2
+##
+{ 'struct': 'CanHostChardevProperties',
+  'data': { 'chardev': 'str',
+            'canbus': 'str' } }
+
+##
 # @CanHostSocketcanProperties:
 #     Properties for can-host-socketcan objects.
 #
@@ -1252,6 +1268,7 @@
     'authz-pam',
     'authz-simple',
     'can-bus',
+    'can-host-chardev',
     { 'name': 'can-host-socketcan',
       'if': 'CONFIG_LINUX' },
     'colo-compare',
@@ -1331,6 +1348,7 @@
       'authz-listfile':             'AuthZListFileProperties',
       'authz-pam':                  'AuthZPAMProperties',
       'authz-simple':               'AuthZSimpleProperties',
+      'can-host-chardev':           'CanHostChardevProperties',
       'can-host-socketcan':         { 'type': 'CanHostSocketcanProperties',
                                       'if': 'CONFIG_LINUX' },
       'colo-compare':               'ColoCompareProperties',

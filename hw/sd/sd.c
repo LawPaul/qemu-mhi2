@@ -204,6 +204,7 @@ struct SDState {
     } rpmb;
     QEMUTimer *ocr_power_timer;
     uint32_t ocr_power_delay_ns;
+    uint32_t ocr_request;
     uint8_t dat_lines;
     bool cmd_line;
     char *preset_auth_key;
@@ -933,6 +934,8 @@ static void sd_reset(DeviceState *dev)
     sect = sd_addr_to_wpnum(size) + 1;
 
     sd->state = sd_idle_state;
+    sd->ocr_request = 0;
+    timer_del(sd->ocr_power_timer);
 
     /* card registers */
     sd->rca = sd_is_emmc(sd) ? 0x0001 : 0x0000;
@@ -1015,6 +1018,24 @@ static const VMStateDescription sd_ocr_vmstate = {
     },
 };
 
+static bool emmc_ocr_request_needed(void *opaque)
+{
+    SDState *sd = opaque;
+
+    return sd_is_emmc(sd) && sd->ocr_request != 0;
+}
+
+static const VMStateDescription emmc_ocr_request_vmstate = {
+    .name = "sd-card/ocr-request",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = emmc_ocr_request_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(ocr_request, SDState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static bool vmstate_needed_for_rpmb(void *opaque)
 {
     SDState *sd = opaque;
@@ -1065,6 +1086,7 @@ static int sd_vmstate_pre_load(void *opaque)
 {
     SDState *sd = opaque;
 
+    sd->ocr_request = 0;
     /* If the OCR state is not included (prior versions, or not
      * needed), then the OCR must be set as powered up. If the OCR state
      * is included, this will be replaced by the state restore.
@@ -1108,6 +1130,7 @@ static const VMStateDescription sd_vmstate = {
     },
     .subsections = (const VMStateDescription * const []) {
         &sd_ocr_vmstate,
+        &emmc_ocr_request_vmstate,
         &emmc_extcsd_vmstate,
         &emmc_rpmb_vmstate,
         NULL
@@ -2271,6 +2294,17 @@ static sd_rsp_type_t sd_cmd_SEND_OP_COND(SDState *sd, SDRequest req)
 {
     if (sd->state != sd_idle_state) {
         return sd_invalid_state_for_cmd(sd, req);
+    }
+
+    if (sd_is_emmc(sd)) {
+        /* JESD84-A43 7.3.4: ignore changes during initialization. */
+        if (!sd->ocr_request &&
+            FIELD_EX32(req.arg, OCR, VDD_VOLTAGE_WINDOW)) {
+            sd->ocr_request = req.arg;
+        }
+        if (sd->ocr_request) {
+            req.arg = sd->ocr_request;
+        }
     }
 
     /* Some firmware pipelines MMC initialization across boot stages. Model

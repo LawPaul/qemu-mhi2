@@ -124,6 +124,8 @@ static void tlbiasid_write(CPUARMState *env, const ARMCPRegInfo *ri,
 
     if (tlb_force_broadcast(env)) {
         tlb_flush_all_cpus_synced(cs);
+    } else if (!is_a64(env) && !arm_feature(env, ARM_FEATURE_PMSA)) {
+        tlb_flush_asid(cs, value & 0xff);
     } else {
         tlb_flush(cs);
     }

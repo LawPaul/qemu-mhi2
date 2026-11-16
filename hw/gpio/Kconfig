@@ -1,6 +1,9 @@
 config PL061
     bool
 
+config DRA7_GPIO
+    bool
+
 config GPIO_KEY
     bool
 

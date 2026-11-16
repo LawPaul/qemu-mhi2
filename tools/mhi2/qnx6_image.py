@@ -8,6 +8,9 @@ Layout (blocksize BS, default 4096):
   [bootblock 0x2000][SB#1 area 0x1000][ data blocks 0..num_blocks-1 ][SB#2 area 0x1000]
   s_blks_off = (0x2000>>bits)+(0x1000>>bits)  -> data block B at disk byte (B+s_blks_off)*BS
   SB#1 at disk byte 0x2000 ; SB#2 at disk block (num_blocks + s_blks_off)
+An optional partition size participates in bitmap sizing before allocation;
+the bitmap covers every advertised data block, including free partition space.
+Inode 2 is always the protected .boot directory, as required by fs-qnx6.
 """
 import os, sys, struct, mmap
 
@@ -143,22 +146,28 @@ VOLID = int(os.environ.get("QNX6_VOLID", "0"))
 INODE_SLACK = int(os.environ.get("QNX6_INODE_SLACK", "0"))
 
 def build(srcdir, outpath, slack_blocks=512, partition_blocks=None):
+    boot_path = os.path.join(srcdir, ".boot")
+    if os.path.lexists(boot_path) and (
+            os.path.islink(boot_path) or not os.path.isdir(boot_path)):
+        raise ValueError("QNX6 .boot must be a directory")
     qb = Qnx6Builder(outpath, slack_blocks)
 
     # ---- phase 1: assign inode numbers (DFS), root = 1 ----
     nodes = []   # (ino, path, parent_ino, kind)  kind: 'd','f','l'
-    ino_counter = [1]
+    ino_counter = [2]
     def kind_of(p):
         if os.path.islink(p): return 'l'
         if os.path.isdir(p): return 'd'
         return 'f'
     root_ino = 1
     nodes.append([1, srcdir, 1, 'd'])
-    ino_counter[0] = 1
+    nodes.append([2, boot_path, 1, 'd'])
     # BFS so inode numbers are contiguous & parents known
     queue = [(1, srcdir)]
+    if os.path.isdir(boot_path):
+        queue.append((2, boot_path))
     # need children mapping for dirs
-    children = {1: []}
+    children = {1: [(".boot", 2, 'd')], 2: []}
     while queue:
         pino, ppath = queue.pop(0)
         try:
@@ -166,6 +175,8 @@ def build(srcdir, outpath, slack_blocks=512, partition_blocks=None):
         except OSError:
             entries = []
         for name in entries:
+            if pino == 1 and name == ".boot":
+                continue
             full = os.path.join(ppath, name)
             k = kind_of(full)
             ino_counter[0] += 1
@@ -199,13 +210,18 @@ def build(srcdir, outpath, slack_blocks=512, partition_blocks=None):
             for nm, cino, ck in children.get(ino, []):
                 add_entry(nm, cino)
             data += bytes((-len(data)) % 1024)
-            inode_data[ino] = (bytes(data), 0o040755, QNX6_FILE_DIRECTORY)
+            inode_data[ino] = (bytes(data), 0o040700 if ino == 2 else 0o040755,
+                               QNX6_FILE_DIRECTORY)
         elif k == 'l':
             tgt = os.readlink(path).encode("utf-8", "surrogateescape")
             inode_data[ino] = (tgt, 0o120777, QNX6_FILE_NORMAL)
         else:
             with open(path, "rb") as fh:
-                inode_data[ino] = (mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ, trackfd=False) if os.fstat(fh.fileno()).st_size else b"", 0o100755, QNX6_FILE_NORMAL)
+                options = {"trackfd": False} if sys.version_info >= (3, 13) else {}
+                data = (mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ,
+                                  **options)
+                        if os.fstat(fh.fileno()).st_size else b"")
+                inode_data[ino] = (data, 0o100755, QNX6_FILE_NORMAL)
 
     # ---- size precompute -> power-safe SYSTEM area size (2 halves) ----
     file_tree_total = sum(total_blocks_for((len(inode_data[i][0]) + BS - 1)//BS)
@@ -220,12 +236,16 @@ def build(srcdir, outpath, slack_blocks=512, partition_blocks=None):
     for _ in range(12):                                           # converge bitmap size
         SYS = I + B
         num_blocks = 2*SYS + U
+        if partition_blocks is not None:
+            num_blocks = max(num_blocks, partition_blocks - SBLKS_OFF - 1)
         bm_data = (((num_blocks + 7)//8) + BS - 1)//BS
         nB = total_blocks_for(bm_data)
         if nB == B: break
         B = nB
     SYS = I + B
     num_blocks = 2*SYS + U
+    if partition_blocks is not None:
+        num_blocks = max(num_blocks, partition_blocks - SBLKS_OFF - 1)
     user_base = 2*SYS
     qb.sys_next = 0
     qb.user_next = user_base
@@ -285,9 +305,6 @@ def build(srcdir, outpath, slack_blocks=512, partition_blocks=None):
     SYSTEM_AREA = 2*SYS
 
     # ---- assemble & write image ----
-    if partition_blocks is not None:
-        num_blocks = max(num_blocks, partition_blocks - SBLKS_OFF - 1)
-        free_blocks = num_blocks - used_total
     total_disk_blocks = num_blocks + SBLKS_OFF + 1   # +1 for SB#2 area
     f = qb.f
     f.truncate(total_disk_blocks * BS)

@@ -10,7 +10,7 @@ broker and Java `DSIKeyPanel` dispatcher → HMI.
 With the prepared experimental media, launch everything with one command:
 
 ```sh
-bash /home/iscle/qemu-mhi2/tools/mhi2/run_ui.sh
+bash tools/mhi2/run_ui.sh --firmware vw --media /path/to/prepared-vw-media
 ```
 
 This starts QEMU, the graphics bridge, the RCC service peer, the MOST video receiver and the viewer.
@@ -37,7 +37,7 @@ touch returning to the radio screen. The viewer's mouse handlers were also
 tested with Qt's offscreen backend. Desktop window creation from the agent
 session was denied by the environment; launch the viewer from your own terminal.
 
-Evidence is in `/home/iscle/Downloads/mhi2-analysis/qemu/evidence-ui/`:
+Historical evidence was retained in a private `evidence-ui/` directory:
 `rcc-touch-radio-before.png`, `rcc-touch-radio-settings.png`,
 `rcc-viewer-click-settings.png`, and `input-mhi2-rcc*` captures/logs.
 Recovered Java interfaces and handlers are in `qemu/protocol-analysis/`.

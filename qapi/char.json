@@ -489,6 +489,10 @@
 #
 # @msmouse: emulated Microsoft serial mouse (since 1.5)
 #
+# @mh2p-rstp: emulated MH2P RCC side of the RSTP UART link, forwarding
+#     host input as keypanel events.  Vehicle inputs
+#     use clamp-state and power-state QOM properties (since 11.2).
+#
 # @wctablet: emulated Wacom Penpartner serial tablet (since 2.9)
 #
 # @braille: Baum Braille device (since 1.5)
@@ -531,6 +535,7 @@
             'mux',
             'hub',
             'msmouse',
+            'mh2p-rstp',
             'wctablet',
             { 'name': 'braille', 'if': 'CONFIG_BRLAPI' },
             'testdev',
@@ -722,6 +727,7 @@
             'mux': 'ChardevMuxWrapper',
             'hub': 'ChardevHubWrapper',
             'msmouse': 'ChardevCommonWrapper',
+            'mh2p-rstp': 'ChardevCommonWrapper',
             'wctablet': 'ChardevCommonWrapper',
             'braille': { 'type': 'ChardevCommonWrapper',
                          'if': 'CONFIG_BRLAPI' },

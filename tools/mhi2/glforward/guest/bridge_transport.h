@@ -16,9 +16,26 @@ extern unsigned long strlen(const char *);
 extern void *mmap_device_memory(void *, unsigned, int, int, unsigned long long);
 extern int usleep(unsigned);
 extern int getpid(void);
+extern int *__get_errno_ptr(void);
+extern int shm_open(const char *, int, unsigned);
+extern void *mmap64(void *, unsigned long, int, int, int, long long);
+extern int munmap(void *, unsigned long);
+extern int close(int);
 static volatile unsigned char *bridge;
 static unsigned char *bulk;
 static unsigned bulk_size;
+#ifndef GLBRIDGE_POLL_SPINS
+#define GLBRIDGE_POLL_SPINS 0
+#endif
+#if GLBRIDGE_POLL_SPINS < 0 || GLBRIDGE_POLL_SPINS > 65536
+#error "GLBRIDGE_POLL_SPINS must be between 0 and 65536"
+#endif
+static int transport_poll(unsigned *remaining)
+{
+    if (!*remaining) return 0;
+    --*remaining;
+    return 1;
+}
 extern void *memcpy(void *,const void *,unsigned long);
 static int g_fd = -1;
 static u32 g_id;
@@ -33,9 +50,23 @@ static unsigned record_key;
 static volatile unsigned record_key_state;
 struct ClientAttrib { u32 size, type, norm, stride, buffer, enabled; const void *pointer; };
 struct Record { unsigned char *data; unsigned size, used, capacity, reply;
-    u32 array_buffer, element_buffer; struct ClientAttrib attribs[16]; };
+    u32 array_buffer, element_buffer; struct ClientAttrib attribs[16];
+#ifdef GLBRIDGE_MH2P_SCREEN
+    u32 egl_thread;
+    i32 egl_error;
+    void *egl_context, *egl_draw, *egl_read;
+#endif
+};
+#ifdef GLBRIDGE_MH2P_SCREEN
+static void release_screen_record(struct Record *r);
+static struct Record *screen_graphics_record(void);
+#endif
 static void release_record(void *p)
-{ struct Record *r=p; if(r){free(r->data);free(r);} }
+{ struct Record *r=p; if(r){
+#ifdef GLBRIDGE_MH2P_SCREEN
+    release_screen_record(r);
+#endif
+    free(r->data);free(r);} }
 static struct Record *current_record(void)
 {
     if (__atomic_load_n(&record_key_state,__ATOMIC_ACQUIRE) != 2) {
@@ -47,12 +78,61 @@ static struct Record *current_record(void)
     struct Record *r=pthread_getspecific(record_key);
     if(!r){r=malloc(sizeof(*r));if(!r)abort();
         for(unsigned i=0;i<sizeof(*r);i++)((unsigned char *)r)[i]=0;
+#ifdef GLBRIDGE_MH2P_SCREEN
+        r->egl_thread=__sync_add_and_fetch(&g_id,1);
+        r->egl_error=0x3000;
+#endif
         if(pthread_setspecific(record_key,r))abort();}
     return r;
+}
+static struct Record *current_graphics_record(void)
+{
+#ifdef GLBRIDGE_MH2P_SCREEN
+    return screen_graphics_record();
+#else
+    return current_record();
+#endif
 }
 static void unlock_record(void)
 { __asm__ volatile("dmb sy" ::: "memory"); *(volatile u32 *)(bridge+16)=0; }
 static volatile u32 connection_state;
+static void transport_error(const char *message, u32 detail)
+{
+    static const char digits[] = "0123456789abcdef";
+    char value[11] = "0x00000000\n";
+    for (unsigned i = 0; i < 8; i++)
+        value[2+i] = digits[(detail >> (28-4*i)) & 15];
+    write(2, "glbridge-transport: ", 20);
+    write(2, message, strlen(message));
+    write(2, value, sizeof(value));
+}
+static void *transport_map(unsigned size, unsigned long long physical,
+                           const char *name)
+{
+    if (!getenv("GLBRIDGE_SHARED_TRANSPORT"))
+        return mmap_device_memory(0, size, 0xb00, 0, physical);
+    int fd = shm_open(name, 2, 0);
+    if (fd < 0) {
+        transport_error("opening shared bridge region failed, errno=",
+                        *__get_errno_ptr());
+        return (void *)-1;
+    }
+    void *mapping = mmap64(0, size, 0xb00, 1, fd, 0);
+    int error = mapping == (void *)-1 ? *__get_errno_ptr() : 0;
+    if (close(fd)) {
+        int close_error = *__get_errno_ptr();
+        transport_error("closing shared bridge region failed, errno=", close_error);
+        if (mapping != (void *)-1) {
+            if (munmap(mapping, size))
+                transport_error("unmapping shared bridge region failed, errno=",
+                                *__get_errno_ptr());
+            mapping = (void *)-1;
+        }
+        if (!error) error = close_error;
+    }
+    if (error) *__get_errno_ptr() = error;
+    return mapping;
+}
 static int gl_conn(void)
 {
     /* Publish the MMIO and bulk mappings together. Other rendering threads
@@ -62,13 +142,25 @@ static int gl_conn(void)
         if (__sync_bool_compare_and_swap(&connection_state,0,1)) break;
         usleep(1000);
     }
-    bridge = mmap_device_memory(0, 12288, 0xb00, 0, 0x5f000000ULL);
-    if (bridge == (void *)-1 || *(volatile u32 *)bridge != 0x474c4252) {
+    bridge = transport_map(12288, 0x5f000000ULL, "/mh2p-glbridge-mmio");
+    if (bridge == (void *)-1) {
+        transport_error("MMIO mapping failed, errno=", *__get_errno_ptr());
+        bridge=0;__atomic_store_n(&connection_state,0,__ATOMIC_RELEASE);return -1;
+    }
+    if (*(volatile u32 *)bridge != 0x474c4252) {
+        transport_error("unexpected MMIO magic=", *(volatile u32 *)bridge);
+        if (munmap((void *)bridge, 12288))
+            transport_error("unmapping invalid bridge failed, errno=",
+                            *__get_errno_ptr());
         bridge=0;__atomic_store_n(&connection_state,0,__ATOMIC_RELEASE);return -1;
     }
     if (*(volatile u32 *)(bridge+24) == 1024*1024) {
-        bulk = mmap_device_memory(0, 2*1024*1024, 0xb00, 0, 0x5e000000ULL);
-        if (bulk == (void *)-1) bulk=0;
+        bulk = transport_map(2*1024*1024, 0x5e000000ULL, "/mh2p-glbridge-bulk");
+        if (bulk == (void *)-1) {
+            transport_error("bulk mapping unavailable; using register transport, errno=",
+                            *__get_errno_ptr());
+            bulk=0;
+        }
         if (bulk) bulk_size=1024*1024;
     }
     g_fd=1;__atomic_store_n(&connection_state,2,__ATOMIC_RELEASE);
@@ -102,9 +194,13 @@ static int recv_bytes(void *p, unsigned long n,int release)
     unsigned char *c = p;
     if (gl_conn() < 0) return -1;
     while (n) {
-        unsigned tries = 0, available;
+        unsigned tries = 0, available, spins = GLBRIDGE_POLL_SPINS;
         while (!(available=*(volatile u32 *)(bridge+(bulk?32:8)))) {
-            if (++tries > 10000) { unlock_record(); return -1; }
+            if (transport_poll(&spins)) continue;
+            if (++tries > 10000) {
+                transport_error("reply timed out, remaining bytes=", n);
+                unlock_record(); return -1;
+            }
             usleep(1000);
         }
         unsigned chunk=available<n?available:n, i=0;
@@ -132,19 +228,37 @@ static int recv_all(void *p,unsigned long n){return recv_bytes(p,n,1);}
 static void commit_record(struct Record *r)
 {
     if(gl_conn()<0)return;
-    while(*(volatile u32 *)(bridge+16))usleep(1000);
+    unsigned spins = GLBRIDGE_POLL_SPINS;
+    while(*(volatile u32 *)(bridge+16))
+        if (!transport_poll(&spins)) usleep(1000);
     send_all(r->data,r->size);
     if(!r->reply)unlock_record();
+}
+/* Write a record's framing (at most 32 bytes) and return its length. */
+static unsigned record_header(struct Record *r,u32 op,u32 total,u32 *h)
+{
+    unsigned prefix=20;
+    (void)r;
+#ifdef GLBRIDGE_MH2P_SCREEN
+    if(op!=1 && op!=139)prefix+=12;
+#endif
+    h[0]=119;h[1]=4;h[2]=getpid();
+#ifdef GLBRIDGE_MH2P_SCREEN
+    if(prefix==32){h[3]=140;h[4]=4;h[5]=r->egl_thread;}
+#endif
+    h[prefix/4-2]=op;h[prefix/4-1]=total;
+    return prefix;
 }
 static void rec(u32 op,u32 total)
 {
     struct Record *r=current_record();
     if(total>16*1024*1024)abort();
-    unsigned size=20+total;
+    u32 h[8];
+    unsigned prefix=record_header(r,op,total,h);
+    unsigned size=prefix+total;
     if(size>r->capacity){r->data=realloc(r->data,size);if(!r->data)abort();r->capacity=size;}
-    u32 *h=(u32 *)r->data;
-    h[0]=119;h[1]=4;h[2]=getpid();h[3]=op;h[4]=total;
-    r->size=size;r->used=20;r->reply=(op>=100&&op<=109)||op==120||op==121||op==123||op==124||op==126||op==127||op==131||op==132||op==138||(op>=134&&op<=137);
+    memcpy(r->data,h,prefix);
+    r->size=size;r->used=prefix;r->reply=(op>=100&&op<=109)||op==120||op==121||op==123||op==124||op==126||op==127||op==131||op==132||op==138||op==139||op==141||op==144||op==145||op==146||(op>=134&&op<=137);
     if(!total)commit_record(r);
 }
 static void record_part(const void *p,unsigned n)

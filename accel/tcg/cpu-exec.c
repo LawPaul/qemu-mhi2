@@ -1076,7 +1076,10 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
     /* Pick up one-insn-per-tb and -d nochain from the command line. */
     tcg_update_cflags(cpu);
 
-    cpu->tb_jmp_cache = g_new0(CPUJumpCache, 1);
+    cpu->tb_jmp_cache_set = g_new0(CPUJumpCacheSet, 1);
+    cpu->tb_jmp_cache_set->used[0] = true;
+    cpu->tb_jmp_cache_set->tag[0] = UINT64_MAX;
+    cpu->tb_jmp_cache = &cpu->tb_jmp_cache_set->bank[0];
     tlb_init(cpu);
 #ifndef CONFIG_USER_ONLY
     tcg_iommu_init_notifier_list(cpu);
@@ -1094,5 +1097,6 @@ void tcg_exec_unrealizefn(CPUState *cpu)
 #endif /* !CONFIG_USER_ONLY */
 
     tlb_destroy(cpu);
-    g_free_rcu(cpu->tb_jmp_cache, rcu);
+    cpu->tb_jmp_cache = NULL;
+    g_free_rcu(cpu->tb_jmp_cache_set, rcu);
 }

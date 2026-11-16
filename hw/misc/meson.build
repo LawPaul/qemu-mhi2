@@ -1,4 +1,5 @@
 system_ss.add(when: 'CONFIG_APPLESMC', if_true: files('applesmc.c'))
+system_ss.add(when: 'CONFIG_OMAP4_MAILBOX', if_true: files('omap4_mailbox.c'))
 
 system_ss.add(when: 'CONFIG_EDU', if_true: files('edu.c'))
 system_ss.add(when: 'CONFIG_FW_CFG_DMA', if_true: files('vmcoreinfo.c'))
@@ -182,6 +183,16 @@ system_ss.add(when: 'CONFIG_TEGRA30_PMC', if_true: files('tegra30_pmc.c'))
 specific_ss.add(when: 'CONFIG_TEGRA30_FLOW', if_true: files('tegra30_flow.c'))
 system_ss.add(when: 'CONFIG_TEGRA30_ARB_SEMA', if_true: files('tegra30_arb_sema.c'))
 system_ss.add(when: 'CONFIG_TEGRA30_SNOR', if_true: files('tegra30_snor.c'))
+system_ss.add(when: 'CONFIG_MH2P', if_true: files('tegra124_host1x.c'))
+system_ss.add(when: 'CONFIG_MH2P_PCIE_SIDEBAND',
+              if_true: files('mh2p_pcie_sideband.c', 'mh2p_pcie_config.c'))
+system_ss.add(when: 'CONFIG_MH2P', if_true: files('gk20a.c'))
+system_ss.add(when: 'CONFIG_MH2P', if_true: files('tegra124_dc.c'))
+system_ss.add(when: 'CONFIG_MH2P', if_true: files('tegra124_hdmi.c'))
+system_ss.add(when: 'CONFIG_MH2P', if_true: files('tegra124_sor.c'))
+system_ss.add(when: 'CONFIG_MH2P', if_true: files('tegra124_vic.c'))
+system_ss.add(when: 'CONFIG_MH2P', if_true: files('tegra124_se.c'))
+system_ss.add(when: 'CONFIG_GLBRIDGE', if_true: files('glbridge.c'))
 system_ss.add(when: 'CONFIG_MMX_IOC', if_true: files('mmx_ioc.c'))
 
 system_ss.add(when: 'CONFIG_AXIADO_CLK', if_true: files('axiado_clk.c'))

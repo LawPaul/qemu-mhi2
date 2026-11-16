@@ -347,6 +347,15 @@ REG32(GUSB2RHBCTL, 0x540)
     FIELD(GUSB2RHBCTL, OVRD_L1TIMEOUT, 0, 4)
 
 #define DWC3_GLOBAL_OFFSET 0xC100
+static void usb_dwc3_reset_phy_interface(DeviceState *dev)
+{
+    USBDWC3 *s = USB_DWC3(dev);
+
+    if (s->cfg.usb2_utmi) {
+        ARRAY_FIELD_DP32(s->regs, GUSB2PHYCFG, ULPI_UTMI_SEL, 0);
+    }
+}
+
 static void reset_csr(USBDWC3 * s)
 {
     int i = 0;
@@ -379,6 +388,7 @@ static void reset_csr(USBDWC3 * s)
         }
     }
 
+    usb_dwc3_reset_phy_interface(DEVICE(s));
     xhci_sysbus_reset(DEVICE(&s->sysbus_xhci));
 }
 
@@ -584,6 +594,7 @@ static void usb_dwc3_reset(DeviceState *dev)
         };
     }
 
+    usb_dwc3_reset_phy_interface(dev);
     xhci_sysbus_reset(DEVICE(&s->sysbus_xhci));
 }
 
@@ -662,6 +673,7 @@ static const VMStateDescription vmstate_usb_dwc3 = {
 };
 
 static const Property usb_dwc3_properties[] = {
+    DEFINE_PROP_BOOL("usb2-utmi", USBDWC3, cfg.usb2_utmi, false),
     DEFINE_PROP_UINT32("DWC_USB3_USERID", USBDWC3, cfg.dwc_usb3_user,
                        0x12345678),
 };

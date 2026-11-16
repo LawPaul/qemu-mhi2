@@ -12,6 +12,8 @@
 #include "internals.h"
 #include "cpu-features.h"
 #include "hw/intc/armv7m_nvic.h"
+#include "hw/core/irq.h"
+#include "qemu/main-loop.h"
 
 /*
  * Returns true if the stage 1 translation regime is using LPAE format page
@@ -322,6 +324,20 @@ void arm_cpu_do_transaction_failed(CPUState *cs, hwaddr physaddr,
     ARMCPU *cpu = ARM_CPU(cs);
     CPUARMState *env = &cpu->env;
     ARMMMUFaultInfo fi = {};
+
+    /*
+     * Cortex-A15 DDI 0438H sections 7.6 and A.4.1: BRESP errors
+     * assert nAXIERRIRQ, with status cleared through L2ECTLR[29].
+     * Opted-in single-core integrations wire this output to their GIC.
+     */
+    if (cpu->has_l2_axi_error && access_type == MMU_DATA_STORE &&
+        !(response & MEMTX_ACCESS_ERROR)) {
+        BQL_LOCK_GUARD();
+
+        env->cp15.l2ectlr |= 1U << 29;
+        qemu_set_irq(cpu->l2_axi_error, 1);
+        return;
+    }
 
     /*
      * For M-profile, CCR.BFHFNMIGN lets software executing at a negative

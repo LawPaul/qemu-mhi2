@@ -5,7 +5,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lzo_library import load_lzo2
 from sparse_copy import copy_sparse
 from qnx6_read import Qnx6
-root=Path(os.environ.get('MHI2_WORKSPACE', '/home/iscle/Downloads/mhi2-analysis/qemu'))
+if not os.environ.get('MHI2_WORKSPACE'):
+ raise SystemExit('Set MHI2_WORKSPACE to your extracted diagnostic media workspace')
+root=Path(os.environ['MHI2_WORKSPACE']).resolve()
 raw=bytearray((root/'main-ifs/imagefs.bin').read_bytes())
 for entry in json.loads((root/'main-ifs/files.json').read_text()):
  name=entry['name']

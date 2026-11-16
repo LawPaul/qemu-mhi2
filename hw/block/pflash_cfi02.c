@@ -39,6 +39,7 @@
 #include "hw/core/qdev-properties-system.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
+#include "qemu/log.h"
 #include "qemu/bitmap.h"
 #include "qemu/timer.h"
 #include "system/block-backend.h"
@@ -62,7 +63,12 @@
 enum {
     WCYCLE_CFI              = 7,
     WCYCLE_AUTOSELECT_CFI   = 8,
+    WCYCLE_STATUS_REGISTER  = 9,
+    WCYCLE_BUFFER_COUNT     = 10,
+    WCYCLE_BUFFER_DATA      = 11,
 };
+
+#define PFLASH_MAX_WRITE_BUFFER 512
 
 struct PFlashCFI02 {
     /*< private >*/
@@ -91,7 +97,16 @@ struct PFlashCFI02 {
     uint16_t ident3;
     uint16_t unlock_addr0;
     uint16_t unlock_addr1;
-    uint8_t cfi_table[0x4d];
+    uint8_t cfi_table[0x58];
+    /* Spansion MirrorBit Eclipse (S29GL-S) extensions. */
+    bool mirrorbit_eclipse;
+    uint32_t write_buffer_size;
+    uint32_t wb_page;
+    uint32_t wb_expected;
+    uint32_t wb_loaded;
+    uint32_t wb_last;
+    uint8_t wb_data[PFLASH_MAX_WRITE_BUFFER];
+    uint8_t wb_valid[PFLASH_MAX_WRITE_BUFFER];
     QEMUTimer timer;
     /*
      * The device replicates the flash memory across its memory space.  Emulate
@@ -113,6 +128,29 @@ struct PFlashCFI02 {
 
 static int pflash_post_load(void *opaque, int version_id);
 
+static bool pflash_write_buffer_needed(void *opaque)
+{
+    PFlashCFI02 *pfl = opaque;
+
+    return pfl->write_buffer_size != 0;
+}
+
+static const VMStateDescription vmstate_pflash_write_buffer = {
+    .name = "pflash_cfi02/write_buffer",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = pflash_write_buffer_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(wb_page, PFlashCFI02),
+        VMSTATE_UINT32(wb_expected, PFlashCFI02),
+        VMSTATE_UINT32(wb_loaded, PFlashCFI02),
+        VMSTATE_UINT32(wb_last, PFlashCFI02),
+        VMSTATE_UINT8_ARRAY(wb_data, PFlashCFI02, PFLASH_MAX_WRITE_BUFFER),
+        VMSTATE_UINT8_ARRAY(wb_valid, PFlashCFI02, PFLASH_MAX_WRITE_BUFFER),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_pflash = {
     .name = "pflash_cfi02",
     .version_id = 1,
@@ -130,6 +168,10 @@ static const VMStateDescription vmstate_pflash = {
         VMSTATE_UINT64(erase_time_remaining, PFlashCFI02),
         VMSTATE_BITMAP(sector_erase_map, PFlashCFI02, 1, total_sectors),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_pflash_write_buffer,
+        NULL
     }
 };
 
@@ -400,6 +442,13 @@ static uint64_t pflash_read(void *opaque, hwaddr offset, unsigned int width)
         ret = pfl->status;
         trace_pflash_read_status(pfl->name, ret);
         break;
+    case 0x25: /* Write to buffer: array reads until the confirm cycle */
+        ret = pflash_data_read(pfl, offset, width);
+        break;
+    case 0x70: /* Eclipse status register read: device ready, no errors */
+        ret = 0x80;
+        pflash_reset_state_machine(pfl);
+        break;
     case 0x98:
         /* CFI query mode */
         if (boff < sizeof(pfl->cfi_table)) {
@@ -462,7 +511,8 @@ static void pflash_write(void *opaque, hwaddr offset, uint64_t value,
 
     trace_pflash_io_write(pfl->name, offset, width, value, pfl->wcycle);
     cmd = value;
-    if (pfl->cmd != 0xA0) {
+    if (pfl->cmd != 0xA0 && pfl->wcycle != WCYCLE_BUFFER_COUNT &&
+        pfl->wcycle != WCYCLE_BUFFER_DATA) {
         /* Reset does nothing during chip erase and sector erase. */
         if (cmd == 0xF0 && pfl->cmd != 0x10 && pfl->cmd != 0x30) {
             if (pfl->wcycle == WCYCLE_AUTOSELECT_CFI) {
@@ -519,6 +569,16 @@ static void pflash_write(void *opaque, hwaddr offset, uint64_t value,
         if (cmd == 0xB0) { /* Erase Suspend */
             return;
         }
+        if (pfl->mirrorbit_eclipse && boff == pfl->unlock_addr0) {
+            if (cmd == 0x70) { /* Status Register Read */
+                pfl->wcycle = WCYCLE_STATUS_REGISTER;
+                pfl->cmd = 0x70;
+                return;
+            }
+            if (cmd == 0x71) { /* Status Register Clear */
+                goto reset_flash;
+            }
+        }
         if (boff != pfl->unlock_addr0 || cmd != 0xAA) {
             trace_pflash_unlock0_failed(pfl->name, boff,
                                         cmd, pfl->unlock_addr0);
@@ -537,6 +597,14 @@ static void pflash_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case 2:
         /* We finished an unlock sequence */
+        if (cmd == 0x25 && pfl->write_buffer_size) {
+            /* Write to Buffer is issued at the target sector address. */
+            pfl->wb_page = offset & ~(hwaddr)(pfl->write_buffer_size - 1);
+            pfl->wcycle = WCYCLE_BUFFER_COUNT;
+            pfl->cmd = 0x25;
+            trace_pflash_write_start(pfl->name, cmd);
+            return;
+        }
         if (!pfl->bypass && boff != pfl->unlock_addr0) {
             trace_pflash_write_failed(pfl->name, boff, cmd);
             goto reset_flash;
@@ -705,6 +773,67 @@ static void pflash_write(void *opaque, hwaddr offset, uint64_t value,
             goto reset_flash;
         }
         break;
+    case WCYCLE_BUFFER_COUNT:
+        pfl->wb_expected = ((value & 0xffff) + 1) * pfl->width;
+        if (pfl->wb_expected > pfl->write_buffer_size) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "%s: write buffer count %u exceeds %u bytes\n",
+                          pfl->name, pfl->wb_expected, pfl->write_buffer_size);
+            goto reset_flash;
+        }
+        pfl->wb_loaded = 0;
+        memset(pfl->wb_valid, 0, sizeof(pfl->wb_valid));
+        pfl->wcycle = WCYCLE_BUFFER_DATA;
+        return;
+    case WCYCLE_BUFFER_DATA:
+        if (pfl->wb_loaded < pfl->wb_expected) {
+            uint32_t index = offset - pfl->wb_page;
+
+            if (offset < pfl->wb_page ||
+                index + width > pfl->write_buffer_size) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "%s: write buffer load outside page 0x%"
+                              HWADDR_PRIx "\n", pfl->name, offset);
+                goto reset_flash;
+            }
+            if (pfl->be) {
+                stn_be_p(pfl->wb_data + index, width, value);
+            } else {
+                stn_le_p(pfl->wb_data + index, width, value);
+            }
+            memset(pfl->wb_valid + index, 1, width);
+            pfl->wb_last = index;
+            pfl->wb_loaded += width;
+            return;
+        }
+        if (cmd != 0x29 ||
+            (offset & ~(hwaddr)(pfl->write_buffer_size - 1)) != pfl->wb_page) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "%s: write buffer aborted by 0x%02x\n",
+                          pfl->name, cmd);
+            goto reset_flash;
+        }
+        trace_pflash_write_block_flush(pfl->name);
+        if (!pfl->ro) {
+            uint8_t *storage = (uint8_t *)pfl->storage + pfl->wb_page;
+            uint32_t first = pfl->write_buffer_size, last = 0;
+
+            for (uint32_t i = 0; i < pfl->write_buffer_size; i++) {
+                if (pfl->wb_valid[i]) {
+                    storage[i] &= pfl->wb_data[i];
+                    first = MIN(first, i);
+                    last = i;
+                }
+            }
+            if (first <= last) {
+                pflash_update(pfl, pfl->wb_page + first, last - first + 1);
+            }
+        }
+        /* Programming completes immediately; DQ7 reflects the last word. */
+        set_dq7(pfl, ~pfl->wb_data[pfl->wb_last]);
+        goto reset_flash;
+    case WCYCLE_STATUS_REGISTER:
+        goto reset_flash;
     /* Special values for CFI queries */
     case WCYCLE_CFI:
     case WCYCLE_AUTOSELECT_CFI:
@@ -770,16 +899,16 @@ static void pflash_cfi02_fill_cfi_table(PFlashCFI02 *pfl, int nb_regions)
     pfl->cfi_table[0x1E] = 0x00;
     /* Timeout per single byte/word write (128 ms) */
     pfl->cfi_table[0x1F] = 0x07;
-    /* Timeout for min size buffer write (NA) */
-    pfl->cfi_table[0x20] = 0x00;
+    /* Timeout for min size buffer write (NA unless buffered writes exist) */
+    pfl->cfi_table[0x20] = pfl->write_buffer_size ? 0x09 : 0x00;
     /* Typical timeout for block erase (512 ms) */
     pfl->cfi_table[0x21] = 0x09;
     /* Typical timeout for full chip erase (4096 ms) */
     pfl->cfi_table[0x22] = 0x0C;
     /* Reserved */
     pfl->cfi_table[0x23] = 0x01;
-    /* Max timeout for buffer write (NA) */
-    pfl->cfi_table[0x24] = 0x00;
+    /* Max timeout for buffer write (NA unless buffered writes exist) */
+    pfl->cfi_table[0x24] = pfl->write_buffer_size ? 0x02 : 0x00;
     /* Max timeout for block erase */
     pfl->cfi_table[0x25] = 0x0A;
     /* Max timeout for chip erase */
@@ -790,11 +919,8 @@ static void pflash_cfi02_fill_cfi_table(PFlashCFI02 *pfl, int nb_regions)
     pfl->cfi_table[0x28] = 0x02;
     pfl->cfi_table[0x29] = 0x00;
     /* Max number of bytes in multi-bytes write */
-    /*
-     * XXX: disable buffered write as it's not supported
-     * pfl->cfi_table[0x2A] = 0x05;
-     */
-    pfl->cfi_table[0x2A] = 0x00;
+    pfl->cfi_table[0x2A] = pfl->write_buffer_size ?
+                           ctz32(pfl->write_buffer_size) : 0x00;
     pfl->cfi_table[0x2B] = 0x00;
     /* Number of erase block regions */
     pfl->cfi_table[0x2c] = nb_regions;
@@ -836,6 +962,36 @@ static void pflash_cfi02_fill_cfi_table(PFlashCFI02 *pfl, int nb_regions)
     /* Page mode not supported. */
     pfl->cfi_table[0x0c + pri_ofs] = 0x00;
     assert(0x0c + pri_ofs < ARRAY_SIZE(pfl->cfi_table));
+
+    if (pfl->mirrorbit_eclipse) {
+        /* S29GL-S primary vendor-specific extended query, version 1.5. */
+        static const uint8_t eclipse_pri[] = {
+            '1', '5',
+            0x1C, /* address-sensitive unlock, 65 nm MirrorBit Eclipse */
+            0x02, /* erase suspend to read/write */
+            0x01, /* one sector per protection group */
+            0x00, /* no temporary sector unprotect */
+            0x08, /* advanced sector protection */
+            0x00, /* no simultaneous operation */
+            0x00, /* no burst mode */
+            0x03, /* 16-word page mode */
+            0x00, 0x00, /* no ACC supply */
+            0x05, /* uniform sectors, WP# protects the highest sector */
+            0x01, /* program suspend */
+            0x00, /* no unlock bypass */
+            0x09, /* 512-byte secure silicon region */
+            0x8F, /* software features */
+            0x05, /* 32-byte page */
+            0x06, /* erase suspend latency */
+            0x06, /* program suspend latency */
+            0x00, /* no bank organisation table */
+        };
+
+        assert(pri_ofs + 3 + sizeof(eclipse_pri) <=
+               ARRAY_SIZE(pfl->cfi_table));
+        memcpy(&pfl->cfi_table[pri_ofs + 3], eclipse_pri,
+               sizeof(eclipse_pri));
+    }
 }
 
 static void pflash_cfi02_realize(DeviceState *dev, Error **errp)
@@ -854,6 +1010,14 @@ static void pflash_cfi02_realize(DeviceState *dev, Error **errp)
     }
     if (pfl->name == NULL) {
         error_setg(errp, "attribute \"name\" not specified.");
+        return;
+    }
+    if (pfl->write_buffer_size &&
+        (!is_power_of_2(pfl->write_buffer_size) ||
+         pfl->write_buffer_size > PFLASH_MAX_WRITE_BUFFER ||
+         pfl->write_buffer_size < MAX(pfl->width, 1))) {
+        error_setg(errp, "unsupported write buffer size %u",
+                   pfl->write_buffer_size);
         return;
     }
 
@@ -985,6 +1149,9 @@ static const Property pflash_cfi02_properties[] = {
     DEFINE_PROP_UINT16("unlock-addr0", PFlashCFI02, unlock_addr0, 0),
     DEFINE_PROP_UINT16("unlock-addr1", PFlashCFI02, unlock_addr1, 0),
     DEFINE_PROP_STRING("name", PFlashCFI02, name),
+    DEFINE_PROP_UINT32("write-buffer-size", PFlashCFI02, write_buffer_size, 0),
+    DEFINE_PROP_BOOL("mirrorbit-eclipse", PFlashCFI02, mirrorbit_eclipse,
+                     false),
 };
 
 static void pflash_cfi02_unrealize(DeviceState *dev)

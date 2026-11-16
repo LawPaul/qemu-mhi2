@@ -39,6 +39,8 @@ static EGLSurface surface;
 static EGLConfig config;
 static int win_w, win_h;
 static uint32_t current_pid;
+static uint32_t request_thread;
+static int default_w, default_h;
 static uint32_t primary_display_pid;
 static GLuint default_gmap[MAXOBJ];
 static GLuint *gmap = default_gmap;        /* guest object id -> real GL object */
@@ -134,6 +136,60 @@ static unsigned char *display_rgba;
 static const char *frame_path(void)
 { const char *p=getenv("MHI2_GL_FRAME");return p&&*p?p:"/tmp/glhost_frame.ppm"; }
 
+static bool frame_dump_enabled(void)
+{
+    const char *disabled = getenv("MHI2_GL_NO_FRAME_DUMP");
+
+    return !disabled || strcmp(disabled, "1");
+}
+
+static bool write_frame(const char *path, const uint8_t *rgba,
+                         int width, int height, int stride, bool inverted)
+{
+    char temporary[4096];
+    int length = snprintf(temporary, sizeof(temporary), "%s.tmp", path);
+    if (length < 0 || (size_t)length >= sizeof(temporary)) {
+        fprintf(stderr, "glhost: frame path too long\n");
+        return false;
+    }
+    uint8_t *row = malloc((size_t)width * 3);
+    if (!row) {
+        fprintf(stderr, "glhost: allocating frame row failed\n");
+        return false;
+    }
+    FILE *file = fopen(temporary, "wb");
+    if (!file) {
+        fprintf(stderr, "glhost: opening frame %s: %s\n", temporary, strerror(errno));
+        free(row);
+        return false;
+    }
+    bool ok = fprintf(file, "P6\n%d %d\n255\n", width, height) > 0;
+    for (int y = 0; ok && y < height; y++) {
+        const uint8_t *source = rgba +
+            (size_t)(inverted ? height - y - 1 : y) * stride;
+        for (int x = 0; x < width; x++) {
+            memcpy(row + x * 3, source + x * 4, 3);
+        }
+        ok = fwrite(row, 3, width, file) == (size_t)width;
+    }
+    if (!ok) {
+        fprintf(stderr, "glhost: writing frame %s failed\n", temporary);
+    }
+    if (fclose(file)) {
+        fprintf(stderr, "glhost: closing frame %s: %s\n", temporary, strerror(errno));
+        ok = false;
+    }
+    if (ok && rename(temporary, path)) {
+        fprintf(stderr, "glhost: publishing frame %s: %s\n", path, strerror(errno));
+        ok = false;
+    }
+    if (!ok && unlink(temporary) && errno != ENOENT) {
+        fprintf(stderr, "glhost: removing frame %s: %s\n", temporary, strerror(errno));
+    }
+    free(row);
+    return ok;
+}
+
 static void dump_frame(const char *path)
 {
     if (!win) return;
@@ -146,18 +202,7 @@ static void dump_frame(const char *path)
         if(display_rgba)memcpy(display_rgba,rgba,n*4);
         video_composite(rgba,win_w,win_h);
     }
-    char temporary[4096];
-    snprintf(temporary, sizeof(temporary), "%s.tmp", path);
-    FILE *f = fopen(temporary, "wb");
-    if (f) {
-        fprintf(f, "P6\n%d %d\n255\n", win_w, win_h);
-        for (int y = win_h - 1; y >= 0; y--) {       /* flip: GL origin bottom-left */
-            const unsigned char *row = rgba + (size_t)y * win_w * 4;
-            for (int x = 0; x < win_w; x++)
-                fwrite(row + x * 4, 1, 3, f);          /* RGBA -> RGB */
-        }
-        if (fclose(f) == 0) rename(temporary, path);
-    }
+    write_frame(path, rgba, win_w, win_h, win_w * 4, true);
     free(rgba);
 }
 
@@ -171,38 +216,56 @@ static void video_display_changed(void)
             struct VideoDecoder *v=&video_decoders[i];
             if(v->used&&v->target&&!v->hidden)active=true;
             if(!v->used||!v->target||v->hidden||!v->rgba||v->published_frames==v->frames)continue;
-            char tmp[4096];snprintf(tmp,sizeof(tmp),"%s.tmp",cluster_path);
-            FILE *f=fopen(tmp,"wb");
             /* source is validated by video_attributes, and defaults to the
              * whole frame. Publish the negotiated viewport at native size. */
             int *s=v->source;
-            if(f){fprintf(f,"P6\n%d %d\n255\n",s[2],s[3]);
-                for(int y=0;y<s[3];y++)for(int x=0;x<s[2];x++)
-                    fwrite(v->rgba+((size_t)(y+s[1])*v->width+x+s[0])*4,1,3,f);
-                if(!fclose(f)&&!rename(tmp,cluster_path))v->published_frames=v->frames;}
+            if (write_frame(cluster_path,
+                            v->rgba + ((size_t)s[1] * v->width + s[0]) * 4,
+                            s[2], s[3], v->width * 4, false))
+                v->published_frames = v->frames;
         }
         if(!active)unlink(cluster_path);
     }
-    if(!display_rgba||!win_w||!win_h)return;
+    if(!frame_dump_enabled()||!display_rgba||!win_w||!win_h)return;
     size_t bytes=(size_t)win_w*win_h*4;
     uint8_t *rgba=malloc(bytes);if(!rgba)return;
     memcpy(rgba,display_rgba,bytes);video_composite(rgba,win_w,win_h);
-    char tmp[4096];snprintf(tmp,sizeof(tmp),"%s.tmp",frame_path());
-    FILE *f=fopen(tmp,"wb");
-    if(f){fprintf(f,"P6\n%d %d\n255\n",win_w,win_h);
-        for(int y=win_h-1;y>=0;y--)for(int x=0;x<win_w;x++)fwrite(rgba+((size_t)y*win_w+x)*4,1,3,f);
-        if(!fclose(f))rename(tmp,frame_path());}
+    write_frame(frame_path(), rgba, win_w, win_h, win_w * 4, true);
     free(rgba);
 }
 
-static int read_full(int fd, void *buf, size_t n)
+struct CommandStream {
+    int fd;
+    size_t start, end;
+    uint8_t bytes[64 * 1024];
+};
+
+static int read_full(struct CommandStream *stream, void *buf, size_t n)
 {
     uint8_t *p = buf;
     while (n) {
-        ssize_t r = read(fd, p, n);
+        size_t available = stream->end - stream->start;
+        if (available) {
+            size_t count = available < n ? available : n;
+            memcpy(p, stream->bytes + stream->start, count);
+            stream->start += count;
+            p += count;
+            n -= count;
+            continue;
+        }
+        /* Large pixel payloads bypass the staging buffer once drained. */
+        bool direct = n >= sizeof(stream->bytes);
+        ssize_t r = read(stream->fd, direct ? p : stream->bytes,
+                         direct ? n : sizeof(stream->bytes));
         if (r == 0) return -1;
         if (r < 0) { if (errno == EINTR) continue; return -1; }
-        p += r; n -= (size_t)r;
+        if (direct) {
+            p += r;
+            n -= (size_t)r;
+        } else {
+            stream->start = 0;
+            stream->end = r;
+        }
     }
     return 0;
 }
@@ -232,46 +295,139 @@ static void ensure_window(int w, int h)
     }
     win = 1;
     win_w = w; win_h = h;
+    default_w = w; default_h = h;
     fprintf(stderr, "glhost: window %dx%d, GLES = %s | %s\n",
             w, h, glGetString(GL_VERSION), glGetString(GL_RENDERER));
     glViewport(0, 0, w, h);
     glClearColor(0.05f, 0.05f, 0.10f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
-    dump_frame(frame_path());
+    if (frame_dump_enabled()) dump_frame(frame_path());
     eglSwapBuffers(display, surface);
+}
+
+struct ClientSurface {
+    uint32_t id;
+    EGLSurface surface;
+    int width, height;
+};
+
+struct Client {
+    uint32_t pid, context_id, owner;
+    EGLContext context;
+    EGLSurface surface;
+    GLuint *objects;
+    struct BlendMetadata *blend;
+    bool managed;
+    struct ClientSurface targets[8], *draw, *read;
+    struct PixmapImage *images;
+    uint32_t saved_errors;
+    struct Client *contexts[7];
+};
+
+static struct Client *current_client;
+
+static bool client_storage(struct Client *c)
+{
+    c->objects = calloc(MAXOBJ, sizeof(GLuint));
+    c->blend = calloc(1, sizeof(struct BlendMetadata));
+    if (!c->objects || !c->blend) {
+        free(c->objects);
+        free(c->blend);
+        c->objects = NULL;
+        c->blend = NULL;
+        return false;
+    }
+    return true;
+}
+
+static struct Client *client_context_at(struct Client *c, unsigned i)
+{
+    return i ? c->contexts[i - 1] : c;
+}
+
+static struct Client *client_context(struct Client *c, uint32_t id)
+{
+    for (unsigned i = 0; c && id && i < 8; i++) {
+        struct Client *context = client_context_at(c, i);
+        if (context && context->context_id == id) return context;
+    }
+    return NULL;
+}
+
+static struct Client *get_client(uint32_t pid)
+{
+    static struct Client clients[32];
+    static unsigned count;
+    ensure_window(0,0);
+    unsigned i;
+    for (i=0;i<count;i++) if (clients[i].pid==pid) break;
+    if (i==count) {
+        if (count==32) return NULL;
+        const EGLint ca[]={EGL_CONTEXT_CLIENT_VERSION,2,EGL_NONE};
+        const EGLint pb[]={EGL_WIDTH,default_w,EGL_HEIGHT,default_h,EGL_NONE};
+        clients[i].pid=pid;
+        clients[i].context=eglCreateContext(display,config,EGL_NO_CONTEXT,ca);
+        clients[i].surface=eglCreatePbufferSurface(display,config,pb);
+        if (!client_storage(&clients[i]) ||
+            clients[i].context==EGL_NO_CONTEXT ||
+            clients[i].surface==EGL_NO_SURFACE) {
+            if (clients[i].context) eglDestroyContext(display,clients[i].context);
+            if (clients[i].surface) eglDestroySurface(display,clients[i].surface);
+            free(clients[i].objects);
+            free(clients[i].blend);
+            memset(&clients[i],0,sizeof(clients[i]));
+            return NULL;
+        }
+        count++;
+    }
+    return &clients[i];
+}
+
+static struct Client *bound_client(uint32_t pid, uint32_t thread)
+{
+    struct Client *c = get_client(pid);
+    if (!c || !c->managed) return c;
+    for (unsigned i = 0; thread && i < 8; i++) {
+        struct Client *context = client_context_at(c, i);
+        if (context && context->owner == thread) return context;
+    }
+    return NULL;
 }
 
 /* Separate guest processes have separate object namespaces and GL state. */
 static void select_client(uint32_t pid)
 {
-    struct Client { uint32_t pid; EGLContext context; EGLSurface surface; GLuint *objects;
-                    struct BlendMetadata *blend; };
-    static struct Client clients[32];
-    static unsigned count;
-    if (pid == current_pid) return;
-    ensure_window(0,0);
-    unsigned i;
-    for (i=0;i<count;i++) if (clients[i].pid==pid) break;
-    if (i==count) {
-        if (count==32) { fprintf(stderr,"Too many graphics clients\n"); exit(1); }
-        const EGLint ca[]={EGL_CONTEXT_CLIENT_VERSION,2,EGL_NONE};
-        const EGLint pb[]={EGL_WIDTH,win_w,EGL_HEIGHT,win_h,EGL_NONE};
-        clients[i].pid=pid;
-        clients[i].context=eglCreateContext(display,config,EGL_NO_CONTEXT,ca);
-        clients[i].surface=eglCreatePbufferSurface(display,config,pb);
-        clients[i].objects=calloc(MAXOBJ,sizeof(GLuint));
-        clients[i].blend=calloc(1,sizeof(struct BlendMetadata));
-        if (!clients[i].objects || !clients[i].blend || clients[i].context==EGL_NO_CONTEXT || clients[i].surface==EGL_NO_SURFACE) exit(1);
-        count++;
+    struct Client *c = bound_client(pid, request_thread);
+    if (!c || (c->managed && (!c->context_id || !c->owner ||
+                              c->owner != request_thread))) {
+        fprintf(stderr, "glhost: missing/current-thread graphics context: "
+                "pid=%u thread=%u context=%u owner=%u\n",
+                pid, request_thread, c ? c->context_id : 0, c ? c->owner : 0);
+        exit(1);
     }
-    surface=clients[i].surface;
-    if (!eglMakeCurrent(display,surface,surface,clients[i].context)) exit(1);
-    gmap=clients[i].objects;
-    blend=clients[i].blend;
+    if (pid == current_pid && c == current_client) return;
+    surface = c->managed ? (c->draw ? c->draw->surface : EGL_NO_SURFACE) :
+                          c->surface;
+    EGLSurface read = c->managed ?
+        (c->read ? c->read->surface : EGL_NO_SURFACE) : surface;
+    if (!eglMakeCurrent(display,surface,read,c->context)) {
+        fprintf(stderr,"glhost: restoring client context failed: %x\n",eglGetError());
+        exit(1);
+    }
+    win_w = c->managed ? (c->draw ? c->draw->width : 0) : default_w;
+    win_h = c->managed ? (c->draw ? c->draw->height : 0) : default_h;
+    gmap=c->objects;
+    blend=c->blend;
     current_pid=pid;
+    current_client=c;
 }
 
+#include "pixmap_images.h"
+#include "egl_surfaces.h"
+#include "astc_textures.h"
+
 #include "native_frames.h"
+
 
 static void pump_events(void) {}
 
@@ -290,8 +446,16 @@ static void check_shader(const char *what, GLuint obj, int is_prog)
 }
 
 /* Reject a broken command boundary before it reaches Mesa or object tables. */
+#include "program_cache.h"
+
 static int valid_record(uint32_t op,uint32_t len,const uint8_t *p)
 {
+    if (op == 145 || op == 146) {
+        return pixmap_record(op, len, p);
+    }
+    if (op == 62) {
+        return len == 20 || (len == 24 && u32(p, 20) <= 1);
+    }
     static const int sizes[120] = {
         [1]=9,
         [2]=17,
@@ -360,6 +524,12 @@ static int valid_record(uint32_t op,uint32_t len,const uint8_t *p)
         [109]=5,
         [119]=5
     };
+    if(op==139)return len==24 && u32(p,0)<=5;
+    if(op==140)return len==4 && u32(p,0)!=0;
+    if(op==141)return len==0;
+    if(op==142 || op==143)return astc_record_valid(op,len,p);
+    if(op==144)return len>12 && len<=4*1024*1024+12 &&
+        u32(p,0)<MAXOBJ && u32(p,8)==len-12;
     if(op==134)return (len==12 || (len==16 && u32(p,12)<=1)) && u32(p,4)>0 && u32(p,4)<=2048 && u32(p,8)>0 && u32(p,8)<=2048;
     if(op==135)return len>8 && len<=VIDEO_MAX_PACKET+8 && u32(p,4)==len-8;
     if(op==136)return len==68;
@@ -408,6 +578,7 @@ static int valid_record(uint32_t op,uint32_t len,const uint8_t *p)
 
 static void serve(int cfd)
 {
+    struct CommandStream stream = {.fd = cfd};
     uint8_t *p = NULL;
     size_t cap = 0;
     unsigned long frames = 0;
@@ -416,10 +587,49 @@ static void serve(int cfd)
     FILE *capture = capture_path && *capture_path ? fopen(capture_path, "wb") : NULL;
     bool trace = getenv("MHI2_GL_TRACE") != NULL;
     bool dump_clients = getenv("MHI2_GL_DUMP_CLIENTS") != NULL;
+    const char *slow_env = getenv("MHI2_GL_SLOW_MS");
+    double slow_ms = slow_env ? atof(slow_env) : 0;
+    struct timespec started = {0};
+    uint32_t last_op = 0, last_pid = 0;
+    /* MHI2_GL_OPSTATS=1: per-opcode handling time, reported every 10 s. */
+    bool opstats = getenv("MHI2_GL_OPSTATS") != NULL;
+    static double op_ms[256];
+    static unsigned long op_count[256];
+    uint32_t stat_op = 0;
+    struct timespec stat_start = {0}, stat_report = {0};
 
     for (;;) {
         uint32_t hdr[2];
-        if (read_full(cfd, hdr, 8) < 0) break;
+        if (opstats && stat_start.tv_sec) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            op_ms[stat_op & 255] += (now.tv_sec - stat_start.tv_sec) * 1e3 +
+                                    (now.tv_nsec - stat_start.tv_nsec) / 1e6;
+            op_count[stat_op & 255]++;
+            stat_start.tv_sec = 0;
+            if (!stat_report.tv_sec) stat_report = now;
+            if (now.tv_sec - stat_report.tv_sec >= 10) {
+                fprintf(stderr, "glhost opstats:");
+                for (unsigned i = 0; i < 256; i++) {
+                    if (op_count[i] && (op_ms[i] >= 5 || i >= 100))
+                        fprintf(stderr, " op%u=%lux/%.0fms", i, op_count[i], op_ms[i]);
+                    op_count[i] = 0; op_ms[i] = 0;
+                }
+                fprintf(stderr, "\n");
+                stat_report = now;
+            }
+        }
+        if (slow_ms > 0 && started.tv_sec) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            double ms = (now.tv_sec - started.tv_sec) * 1e3 +
+                        (now.tv_nsec - started.tv_nsec) / 1e6;
+            if (ms >= slow_ms)
+                fprintf(stderr, "glhost: slow op=%u pid=%u %.1fms\n",
+                        last_op, last_pid, ms);
+            started.tv_sec = 0;
+        }
+        if (read_full(&stream, hdr, 8) < 0) break;
         uint32_t op = hdr[0], len = hdr[1];
         if (len > 64 * 1024 * 1024) break;
         if (trace) fprintf(stderr, "glhost op=%u len=%u\n", op, len);
@@ -428,7 +638,16 @@ static void serve(int cfd)
             p = realloc(p, cap);
             if (!p) { fprintf(stderr, "glhost: OOM %u\n", len); break; }
         }
-        if (len && read_full(cfd, p, len) < 0) break;
+        if (len && read_full(&stream, p, len) < 0) break;
+        if (opstats) {
+            clock_gettime(CLOCK_MONOTONIC, &stat_start);
+            stat_op = op;
+        }
+        if (slow_ms > 0) {
+            clock_gettime(CLOCK_MONOTONIC, &started);
+            last_op = op;
+            last_pid = request_pid;
+        }
         if(capture){fwrite(hdr,1,8,capture);fwrite(p,1,len,capture);fflush(capture);}
         /* Pre-merge Audi shims used 128 for a 12-byte query. Porsche 128
          * carries at least 24 bytes. Retain both wire formats without ambiguity. */
@@ -438,12 +657,62 @@ static void serve(int cfd)
             break;
         }
         pump_events();
+        /* Initialize dimensions before client selection creates a context. */
+        if (op == 1) {
+            ensure_window(i32(p, 0), i32(p, 4));
+        }
         /* Encoder traffic has no GL state. Polling must not flush another
          * client's renderer by repeatedly making the encoder owner's context
          * current. Owner selection takes effect lazily for graphics commands. */
-        if(op!=119 && op!=122 && op!=126 && op!=127 && !(op>=134&&op<=137))select_client(request_pid);
+        if(op!=1 && op!=119 && op!=122 && op!=126 && op!=127 &&
+           op!=139 && op!=140 && !(op>=134&&op<=137))select_client(request_pid);
 
         switch (op) {
+        case 145: {
+            uint32_t error = pixmap_control(current_client, p);
+            if (error) fprintf(stderr, "glhost: pixmap action %u image %u "
+                               "failed: %x\n", u32(p, 0), u32(p, 4), error);
+            if (write(STDOUT_FILENO, &error, 4) != 4) return;
+            break;
+        }
+        case 146: {
+            size_t bytes = (size_t)u32(p, 12) * u32(p, 16) * 4;
+            uint32_t *reply = calloc(1, bytes + 4);
+            if (!reply) {
+                fprintf(stderr, "glhost: pixmap readback allocation failed\n");
+                return;
+            }
+            reply[0] = pixmap_read(current_client, p, reply + 1);
+            if (reply[0]) fprintf(stderr, "glhost: pixmap readback failed: %x\n", reply[0]);
+            size_t sent = 0;
+            while (sent < bytes + 4) {
+                ssize_t n = write(STDOUT_FILENO, (uint8_t *)reply + sent,
+                                  bytes + 4 - sent);
+                if (n < 0 && errno == EINTR) continue;
+                if (n <= 0) break;
+                sent += n;
+            }
+            free(reply);
+            if (sent != bytes + 4) {
+                fprintf(stderr, "glhost: pixmap readback reply transport failed\n");
+                return;
+            }
+            break;
+        }
+        case 144: {
+            uint32_t error = cached_program(u32(p, 0), u32(p, 4), p + 12,
+                                             u32(p, 8));
+            if (write(STDOUT_FILENO, &error, 4) != 4) return;
+            break;
+        }
+        case 141: {
+            uint32_t supported = astc_supported();
+            if (write(STDOUT_FILENO, &supported, 4) != 4) return;
+            break;
+        }
+        case 142: case 143:
+            astc_upload(op, p);
+            break;
         case 134: case 135: case 136: case 137: {
             uint32_t status=0;
             if(op==134){status=video_open(request_pid,p);
@@ -454,7 +723,15 @@ static void serve(int cfd)
             if(write(STDOUT_FILENO,&status,4)!=4)return;
             break;
         }
-        case 119: request_pid=u32(p,0); break;
+        case 119: request_pid=u32(p,0); request_thread=0; break;
+        case 140: request_thread=u32(p,0); break;
+        case 139: {
+            uint32_t error = client_egl_control(request_pid, p);
+            if (error != EGL_SUCCESS)
+                fprintf(stderr,"glhost: EGL action %u failed: %x\n",u32(p,0),error);
+            if(write(STDOUT_FILENO,&error,4)!=4)return;
+            break;
+        }
         case 125: primary_display_pid=current_pid;break;
         case 122: encoder_close(request_pid,u32(p,0));break;
         case 123: case 124: {
@@ -488,10 +765,10 @@ static void serve(int cfd)
         case 133: native_frame_remove(u32(p,0));break;
         case 120: case 131: {
             size_t size=(size_t)u32(p,8)*u32(p,12)*4;
-            unsigned char *pixels=calloc(1,size);if(!pixels)return;
+            unsigned char *pixels=malloc(size);if(!pixels)return;
             GLint alignment;glGetIntegerv(GL_PACK_ALIGNMENT,&alignment);
             glPixelStorei(GL_PACK_ALIGNMENT,1);
-            glReadPixels(i32(p,0),i32(p,4),i32(p,8),i32(p,12),GL_RGBA,GL_UNSIGNED_BYTE,pixels);
+            fast_read_pixels(i32(p,0),i32(p,4),i32(p,8),i32(p,12),pixels);
             glPixelStorei(GL_PACK_ALIGNMENT,alignment);
             size_t done=0;
             while(done<size){ssize_t n=write(STDOUT_FILENO,pixels+done,size-done);
@@ -501,14 +778,16 @@ static void serve(int cfd)
             else free(pixels);
             break;
         }
-        case 1:  ensure_window(len >= 8 ? i32(p, 0) : 0, len >= 8 ? i32(p, 4) : 0); break;
+        case 1:
+            break;
         case 2:  ensure_window(0, 0); glViewport(i32(p,0), i32(p,4), i32(p,8), i32(p,12)); break;
         case 3:  ensure_window(0, 0); { float c[4]; memcpy(c, p, 16);
                  glClearColor(c[0], c[1], c[2], c[3]); } break;
         case 4:  ensure_window(0, 0); menu_texture_reset_draw(); glClear(u32(p, 0)); break;
         case 5:  ensure_window(0, 0);
                  menu_texture_reset_draw();
-                 if(!primary_display_pid || current_pid==primary_display_pid)
+                 if(frame_dump_enabled() &&
+                    (!primary_display_pid || current_pid==primary_display_pid))
                      dump_frame(frame_path());
                  if(dump_clients){char path[128];snprintf(path,sizeof(path),"/tmp/mhi2-client-%u.ppm",current_pid);dump_frame(path);}
                  eglSwapBuffers(display, surface);
@@ -763,7 +1042,7 @@ static void serve(int cfd)
             break;
         }
         case 105: {
-            int32_t out=glGetError();
+            int32_t out=client_gl_error(current_client);
             if(write(STDOUT_FILENO,&out,4)!=4)return;
             break;
         }
@@ -776,7 +1055,19 @@ static void serve(int cfd)
         }
         case 60: glBindFramebuffer(u32(p,0),M(u32(p,4))); break;
         case 61: glBindRenderbuffer(u32(p,0),M(u32(p,4))); break;
-        case 62: glFramebufferTexture2D(u32(p,0),u32(p,4),u32(p,8),M(u32(p,12)),i32(p,16)); break;
+        case 62:
+            glFramebufferTexture2D(u32(p,0),u32(p,4),u32(p,8),
+                                    M(u32(p,12)),i32(p,16));
+            if (len == 24) {
+                struct Client *client = current_client;
+                GLenum error = pixmap_framebuffer_origin(client, u32(p,0),
+                                                         u32(p,20));
+                if (error) {
+                    fprintf(stderr, "glhost: framebuffer origin failed: %x\n", error);
+                    client->saved_errors |= 1u << (error - 0x500);
+                }
+            }
+            break;
         case 63: glRenderbufferStorage(u32(p,0),u32(p,4),i32(p,8),i32(p,12)); break;
         case 64: glFramebufferRenderbuffer(u32(p,0),u32(p,4),u32(p,8),M(u32(p,12))); break;
         case 65: glScissor(i32(p,0),i32(p,4),i32(p,8),i32(p,12)); break;

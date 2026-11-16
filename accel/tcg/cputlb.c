@@ -149,16 +149,27 @@ static void tlb_window_reset(CPUTLBDesc *desc, int64_t ns,
 
 static void tb_jmp_cache_clear_page(CPUState *cpu, vaddr page_addr)
 {
-    CPUJumpCache *jc = cpu->tb_jmp_cache;
+    CPUJumpCacheSet *set = cpu->tb_jmp_cache_set;
+    CPUJumpCache *jc = qatomic_read(&cpu->tb_jmp_cache);
+    uint32_t gen;
     int i, i0;
 
-    if (unlikely(!jc)) {
+    if (unlikely(!set || !jc)) {
         return;
     }
 
+    /* Inactive banks may hold global mappings of this page as well. */
     i0 = tb_jmp_cache_hash_page(page_addr);
-    for (i = 0; i < TB_JMP_PAGE_SIZE; i++) {
-        qatomic_set(&jc->array[i0 + i].tb, NULL);
+    gen = qatomic_read(&set->gen);
+    for (unsigned b = 0; b < TB_JMP_CACHE_BANKS; b++) {
+        CPUJumpCache *bank = &set->bank[b];
+
+        if (bank != jc && (!set->used[b] || set->bank_gen[b] != gen)) {
+            continue;
+        }
+        for (i = 0; i < TB_JMP_PAGE_SIZE; i++) {
+            qatomic_set(&bank->array[i0 + i].tb, NULL);
+        }
     }
 }
 
@@ -367,9 +378,8 @@ static void flush_all_helper(CPUState *src, run_on_cpu_func fn,
     }
 }
 
-static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
+static void tlb_flush_mmuidx_entries(CPUState *cpu, MMUIdxMap asked)
 {
-    MMUIdxMap asked = data.host_int;
     MMUIdxMap all_dirty, work, to_clean;
     int64_t now = get_clock_realtime();
 
@@ -391,8 +401,6 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
 
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
 
-    tcg_flush_jmp_cache(cpu);
-
     if (to_clean == ALL_MMUIDX_BITS) {
         qatomic_set(&cpu->neg.tlb.c.full_flush_count,
                     cpu->neg.tlb.c.full_flush_count + 1);
@@ -407,6 +415,12 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
     }
 }
 
+static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
+{
+    tlb_flush_mmuidx_entries(cpu, data.host_int);
+    tcg_flush_jmp_cache(cpu);
+}
+
 void tlb_flush_by_mmuidx(CPUState *cpu, MMUIdxMap idxmap)
 {
     tlb_debug("mmu_idx: 0x%" PRIx16 "\n", idxmap);
@@ -419,6 +433,26 @@ void tlb_flush_by_mmuidx(CPUState *cpu, MMUIdxMap idxmap)
 void tlb_flush(CPUState *cpu)
 {
     tlb_flush_by_mmuidx(cpu, ALL_MMUIDX_BITS);
+}
+
+/*
+ * Flush the softmmu TLB for a change of translation context (ASID).  The
+ * TLB is not ASID-tagged so it must be flushed, but the jump cache for
+ * @tag is retained in a separate bank: guests must invalidate TLBs before
+ * reusing an ASID, and every TLB invalidation also invalidates all banks.
+ */
+void tlb_flush_asid_switch(CPUState *cpu, uint64_t tag)
+{
+    assert_cpu_is_self(cpu);
+    tlb_flush_mmuidx_entries(cpu, ALL_MMUIDX_BITS);
+    tcg_switch_jmp_cache(cpu, tag);
+}
+
+void tlb_flush_asid(CPUState *cpu, uint32_t asid)
+{
+    assert_cpu_is_self(cpu);
+    tlb_flush_mmuidx_entries(cpu, ALL_MMUIDX_BITS);
+    tcg_flush_jmp_cache_asid(cpu, asid);
 }
 
 void tlb_flush_by_mmuidx_all_cpus_synced(CPUState *src_cpu, MMUIdxMap idxmap)
@@ -507,6 +541,27 @@ static void tlb_flush_page_locked(CPUState *cpu, int midx, vaddr page)
 
     /* Check if we need to flush due to large pages.  */
     if ((page & lp_mask) == lp_addr) {
+        CPUTLBDescFast *f = &cpu->neg.tlb.f[midx];
+        vaddr lp_pages = (~lp_mask >> TARGET_PAGE_BITS) + 1;
+
+        /*
+         * Entries for a large page are stored per small page, so when the
+         * tracked region spans no more pages than the TLB has entries it is
+         * cheaper to drop just those than to flush (and refill) everything.
+         * Guests that remap many 4K pages near a section mapping hit this
+         * constantly.
+         */
+        if (lp_mask && lp_pages <= tlb_n_entries(f)) {
+            for (vaddr i = 0; i < lp_pages; i++) {
+                vaddr p = lp_addr + (i << TARGET_PAGE_BITS);
+
+                if (tlb_flush_entry_locked(tlb_entry(cpu, midx, p), p)) {
+                    tlb_n_used_entries_dec(cpu, midx);
+                }
+            }
+            tlb_flush_vtlb_page_mask_locked(cpu, midx, lp_addr, lp_mask);
+            return;
+        }
         tlb_debug("forcing full flush midx %d (%016"
                   VADDR_PRIx "/%016" VADDR_PRIx ")\n",
                   midx, lp_addr, lp_mask);

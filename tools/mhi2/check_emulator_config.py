@@ -15,6 +15,22 @@ from rcc_persistence import Persistence
 
 
 class Checks(unittest.TestCase):
+    def test_profiles_require_explicit_private_media(self):
+        for name in ('vw', 'audi-a3', 'porsche'):
+            with self.subTest(name=name), patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(current()['metadata'], '')
+                with self.assertRaisesRegex(ValueError, 'Select --media'):
+                    configure(name)
+
+    def test_legacy_vw_workspace_is_explicit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(os.environ, {'MHI2_MEDIA_ROOT': directory}, clear=True):
+                configure('vw')
+                self.assertEqual(os.environ['MHI2_DEBUG_NOR'],
+                                 str(root / 'k3342-gl-debug-nor.bin'))
+                self.assertEqual(os.environ['MHI2_EMMC'], str(root / 'emmc-gl.raw'))
+
     def test_porsche_equipment_matches_feature_permissions(self):
         config = defaults()
         meta = {'release': 'MHI2_ER_POG11_K5126'}

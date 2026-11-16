@@ -48,16 +48,17 @@ static int fd_chr_write(Chardev *chr, const uint8_t *buf, int len)
 static gboolean fd_chr_read(QIOChannel *chan, GIOCondition cond, void *opaque)
 {
     Chardev *chr = CHARDEV(opaque);
-    FDChardev *s = FD_CHARDEV(opaque);
-    int len;
+    int len, available;
     QEMU_UNINITIALIZED uint8_t buf[CHR_READ_BUF_LEN];
     ssize_t ret;
 
     len = sizeof(buf);
-    if (len > s->max_size) {
-        len = s->max_size;
+    /* A frontend may receive synchronous input after the read poll. */
+    available = qemu_chr_be_can_write(chr);
+    if (len > available) {
+        len = available;
     }
-    if (len == 0) {
+    if (len <= 0) {
         return TRUE;
     }
 

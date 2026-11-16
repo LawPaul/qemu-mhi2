@@ -1,6 +1,8 @@
 from pathlib import Path
-import struct,zlib
-root=Path('/home/iscle/Downloads/mhi2-analysis');raw=bytearray((root/'extracted/MMX2/mifs-stage1/70/default/mifs-stage1.img').read_bytes());p=bytearray(zlib.decompress(raw[0x800:]));base=8+struct.unpack_from('<I',p,8+32)[0];assert p[base:base+7]==b'imagefs';pos=base+struct.unpack_from('<I',p,base+16)[0]
+import os,struct,zlib
+if not os.environ.get('MHI2_ANALYSIS_ROOT'):
+ raise SystemExit('Set MHI2_ANALYSIS_ROOT to your private extracted/ and qemu/ workspace')
+root=Path(os.environ['MHI2_ANALYSIS_ROOT']).resolve();raw=bytearray((root/'extracted/MMX2/mifs-stage1/70/default/mifs-stage1.img').read_bytes());p=bytearray(zlib.decompress(raw[0x800:]));base=8+struct.unpack_from('<I',p,8+32)[0];assert p[base:base+7]==b'imagefs';pos=base+struct.unpack_from('<I',p,base+16)[0]
 script = None
 while True:
  n=struct.unpack_from('<H',p,pos)[0];assert n

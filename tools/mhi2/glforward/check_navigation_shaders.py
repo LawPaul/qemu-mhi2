@@ -5,7 +5,9 @@ Requires captured K3342 binaries; override MHI2_SHADER_CAPTURE and MHI2_GLHOST.
 """
 import os,struct,subprocess
 from pathlib import Path
-ROOT=Path(os.environ.get('MHI2_SHADER_CAPTURE','/home/iscle/Downloads/mhi2-analysis/qemu/navigation-capture'))
+if not os.environ.get('MHI2_SHADER_CAPTURE'):
+ raise SystemExit('Set MHI2_SHADER_CAPTURE to your private navigation shader captures')
+ROOT=Path(os.environ['MHI2_SHADER_CAPTURE']).resolve()
 HOST=os.environ.get('MHI2_GLHOST','/tmp/mhi2-glhost')
 def u(*v):return struct.pack('<'+'I'*len(v),*v)
 def f(*v):return struct.pack('<'+'f'*len(v),*v)

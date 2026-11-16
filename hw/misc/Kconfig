@@ -2,6 +2,9 @@ config APPLESMC
     bool
     depends on ISA_BUS
 
+config OMAP4_MAILBOX
+    bool
+
 config ARMSSE_CPUID
     bool
 
@@ -254,6 +257,9 @@ config IOSB
 config XLNX_VERSAL_TRNG
     bool
 
+config GLBRIDGE
+    bool
+
 config TEGRA30_APB_MISC
     bool
 
@@ -284,3 +290,6 @@ config K230_DECOMP_GZIP
     bool
 
 source macio/Kconfig
+
+config MH2P_PCIE_SIDEBAND
+    bool

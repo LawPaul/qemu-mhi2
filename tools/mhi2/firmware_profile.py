@@ -31,10 +31,10 @@ PROFILES = {
                     metadata=''),
     'vw': dict(brand='volkswagen', title='Volkswagen MHI2', keyboard=13, touch=True,
                train='MHI2_ER_VWG11_K3342', mu='1427', oscillator_12mhz=False,
-               metadata='/home/iscle/Downloads/mhi2-analysis/extracted/metainfo2.txt'),
+               metadata=''),
     'audi-a3': dict(brand='audi', title='Audi A3 MMI', keyboard=1, touch=False,
                     train='MHI2_ER_AU37x_P5089', mu='1326', oscillator_12mhz=True,
-                    metadata='/home/iscle/mhi2-audi-port/firmware/metainfo2.txt'),
+                    metadata=''),
 }
 
 
@@ -86,10 +86,12 @@ def configure(name, media=None):
     os.environ['MHI2_FIRMWARE'] = name
     profile = dict(PROFILES[name])
     os.environ['MHI2_OSCILLATOR_12MHZ'] = str(int(profile['oscillator_12mhz']))
-    if name == 'porsche' and not media:
-        raise ValueError('Porsche requires --media with prepared Porsche images')
+    if not media and (name != 'vw' or not os.environ.get('MHI2_MEDIA_ROOT')):
+        raise ValueError(
+            'Select --media with prepared firmware images; the legacy VW '
+            'workspace also accepts MHI2_MEDIA_ROOT')
     if name == 'audi-a3' or media:
-        directory = Path(media or '/home/iscle/mhi2-audi-port/media/audi-a3').resolve()
+        directory = Path(media).resolve()
         import json
         manifest = json.loads((directory / 'ui-manifest.json').read_text())
         if manifest.get('firmware_train') != profile['train']:
@@ -110,7 +112,7 @@ def configure(name, media=None):
                           MHI2_EMMC=str(directory / 'emmc.raw'),
                           MHI2_MEDIA_ROOT=str(directory.parent))
     else:
-        root = Path('/home/iscle/Downloads/mhi2-analysis/qemu')
+        root = Path(os.environ['MHI2_MEDIA_ROOT']).resolve()
         os.environ.setdefault('MHI2_DEBUG_NOR', str(root / 'k3342-gl-debug-nor.bin'))
         disk = root / 'emmc-gl.raw'
         for name, marker in [('emmc-maps', 'maps'), ('emmc-complete', 'speech')]:

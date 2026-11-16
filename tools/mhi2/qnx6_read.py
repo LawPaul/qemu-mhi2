@@ -3,7 +3,8 @@
 
 On-disk format per the project's mkqnx6fs.py / validate_qnx6.py:
   [boot 0x2000][SB#1 0x1000][ data blocks 0.. ][SB#2 0x1000]
-  data block B at partition byte (B + sblks_off)*BS, sblks_off=(0x2000+0x1000)/BS
+  data block B at partition byte (B + sblks_off)*BS,
+  sblks_off=ceil((0x2000+0x1000)/BS)
 Superblock @ part+0x2000, magic 0x68191122. 4 root nodes @ off 72,152,232,312:
   size(Q) ptr[16](16I) levels(B) mode(B). root[0]=inode tree, root[2]=longfile tree.
 Inodes are 128 bytes: size(Q@0) mode(H@32) ptr[16](16I@36) levels(B@100) status(B@101).
@@ -27,7 +28,7 @@ class Qnx6:
         self.ppb = self.bs // 4
         self.num_inodes = struct.unpack_from("<I", sb, 52)[0]
         self.num_blocks = struct.unpack_from("<I", sb, 60)[0]
-        self.sblks_off = (0x2000 // self.bs) + (0x1000 // self.bs)
+        self.sblks_off = (0x2000 + 0x1000 + self.bs - 1) // self.bs
         self.inode_root = self._rootnode(sb, 72)
         self.long_root = self._rootnode(sb, 232)
         # cache the whole inode table

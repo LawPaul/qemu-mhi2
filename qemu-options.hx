@@ -5339,7 +5339,8 @@ DEF("icount", HAS_ARG, QEMU_OPTION_icount, \
 SRST
 ``-icount [shift=N|auto][,align=on|off][,sleep=on|off][,rr=record|replay,rrfile=filename[,rrsnapshot=snapshot]]``
     Enable virtual instruction counter. The virtual cpu will execute one
-    instruction every 2^N ns of virtual time. If ``auto`` is specified
+    instruction every 2^N ns of virtual time. N may be as low as -3,
+    executing up to eight instructions per nanosecond. If ``auto`` is specified
     then the virtual cpu speed will be automatically adjusted to keep
     virtual time within a few seconds of real time.
 

@@ -15,6 +15,9 @@
 #include "internals.h"
 #if !defined(CONFIG_USER_ONLY)
 #include "hw/core/boards.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/irq.h"
+#include "qemu/main-loop.h"
 #endif
 #include "cpregs.h"
 
@@ -373,6 +376,32 @@ static uint64_t a15_l2ctlr_read(CPUARMState *env, const ARMCPRegInfo *ri)
      */
     return ((ms->smp.cpus - 1) << 24) | (1 << 23);
 }
+
+static void a15_l2ectlr_raw_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                                uint64_t value)
+{
+    ARMCPU *cpu = env_archcpu(env);
+    BQL_LOCK_GUARD();
+
+    env->cp15.l2ectlr = cpu->has_l2_axi_error ? value & (1U << 29) : 0;
+    qemu_set_irq(cpu->l2_axi_error, !!env->cp15.l2ectlr);
+}
+
+static void a15_l2ectlr_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                            uint64_t value)
+{
+    if (arm_is_secure(env) || (env->cp15.nsacr & (1U << 17))) {
+        a15_l2ectlr_raw_write(env, ri, env->cp15.l2ectlr & value);
+    }
+}
+
+static void a15_l2ectlr_reset(CPUARMState *env, const ARMCPRegInfo *ri)
+{
+    a15_l2ectlr_raw_write(env, ri, 0);
+}
+
+static const Property a15_l2_axi_error_property =
+    DEFINE_PROP_BOOL("l2-axi-error-irq", ARMCPU, has_l2_axi_error, false);
 #endif
 
 static const ARMCPRegInfo cortexa15_cp_reginfo[] = {
@@ -382,7 +411,13 @@ static const ARMCPRegInfo cortexa15_cp_reginfo[] = {
       .writefn = arm_cp_write_ignore, },
 #endif
     { .name = "L2ECTLR", .cp = 15, .crn = 9, .crm = 0, .opc1 = 1, .opc2 = 3,
+#ifndef CONFIG_USER_ONLY
+      .access = PL1_RW, .fieldoffset = offsetof(CPUARMState, cp15.l2ectlr),
+      .writefn = a15_l2ectlr_write, .raw_writefn = a15_l2ectlr_raw_write,
+      .resetfn = a15_l2ectlr_reset },
+#else
       .access = PL1_RW, .type = ARM_CP_CONST, .resetvalue = 0 },
+#endif
 };
 
 static void cortex_a7_initfn(Object *obj)
@@ -442,6 +477,9 @@ static void cortex_a15_initfn(Object *obj)
     ARMCPU *cpu = ARM_CPU(obj);
     ARMISARegisters *isar = &cpu->isar;
 
+#ifndef CONFIG_USER_ONLY
+    qdev_property_add_static(DEVICE(obj), &a15_l2_axi_error_property);
+#endif
     cpu->dtb_compatible = "arm,cortex-a15";
     set_feature(&cpu->env, ARM_FEATURE_V7VE);
     set_feature(&cpu->env, ARM_FEATURE_NEON);

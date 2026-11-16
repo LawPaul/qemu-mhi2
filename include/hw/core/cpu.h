@@ -519,6 +519,7 @@ struct CPUState {
     MemoryRegion *memory;
 
     struct CPUJumpCache *tb_jmp_cache;
+    struct CPUJumpCacheSet *tb_jmp_cache_set;
 
     GArray *gdb_regs;
     int gdb_num_regs;

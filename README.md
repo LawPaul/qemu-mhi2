@@ -1,5 +1,29 @@
 # MHI2 head-unit emulator
 
+**Early MH2P source preview:** this checkout also includes an independent
+[`mh2p` machine and bring-up guide](tools/mh2p/README.md). It boots the tested
+Porsche P2865 QNX system and provides opt-in diagnostics. A private paired
+MMX/RCC harness runs the original HMI using a diagnostic graphics bridge,
+native display-controller scanout and native RSTP input. Three fresh local
+controls verify original display initialization and six reversible Home/Media
+input cycles. A bounded control also verifies the original RCC network stack
+and two late ping samples. **Sustained HMI health is not verified.**
+Audio watchdog failures, variable response times and incomplete backend
+applications remain. Experimental CAN ignition is not a complete vehicle
+model, and a complete SubCPU peer remains unresolved.
+Native GPU command rendering is not implemented; bridge-assisted rendering
+is not evidence that the stock GPU driver works.
+The [current MH2P status and release boundaries](tools/mh2p/README.md#current-status-and-release-boundaries)
+distinguish these local results from a reproducible end-user release. The
+complete paired harness still depends on private session tooling; this
+checkout does not yet provide a standalone supported MH2P HMI launcher.
+The working MHI2 UI described below does
+not apply to MH2P.
+
+See the [publication checklist](tools/PUBLICATION.md) before sharing source
+or creating release assets. Firmware, captures, prepared media and
+firmware-derived ModKit packages are not emulator release assets.
+
 Boot supported **Audi, Volkswagen and Porsche MHI2 firmware** on a Mac, with
 the original QNX user interface and emulated vehicle/companion services.
 This is an experimental QEMU fork. It does not require a head unit,

@@ -62,7 +62,7 @@ mount: Possible reason: Invalid argument
 mount: Can't mount /mnt/mmebackup (type qnx6) 
 mount: Possible reason: Invalid argument 
 /usr/sbin/startup.sh[76]: cannot open /dev/nvpower/init_lp_state: No such file or directory
-[OOC.FwLibLoader] ERROR: Error Timeout waiting for path specified in IPL_CONFIG_DIR environment variable in fwlibloader_waitForConfigDir (/home/jenkins/workspace/PM_build_swdl/systools_src/ooc/ooc_main/fwlibloader.c:143)
+[OOC.FwLibLoader] ERROR: Error Timeout waiting for path specified in IPL_CONFIG_DIR environment variable in fwlibloader_waitForConfigDir ([firmware build path redacted]/fwlibloader.c:143)
 [OOC.FwLibLoader] FATAL: Could not load fw library! Trigger system reset
 [OOC.IOC] WARN: Request reset without persistency.
 LP_GPIO_ST

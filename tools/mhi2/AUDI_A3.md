@@ -1,7 +1,7 @@
 # Audi A3 MHI2 P5089
 
 For a fresh Mac, use the [macOS setup and boot guide](../../README.md), including
-its Audi A3 command. The workspace paths below are historical examples.
+its Audi A3 command. Paths below refer to your own prepared media.
 
 The unified `main` branch includes the native Audi QNX HMI from
 `MHI2_ER_AU37x_P5089_MU1326 (A3).7z` alongside VW K3342. It uses the firmware's
@@ -10,22 +10,16 @@ This is prepared emulator media, not an image for flashing a head unit.
 
 ## Run
 
-On this workspace:
+From the checkout root:
 
 ```sh
-bash /home/iscle/mhi2-audi-port/run.sh
-```
-
-The equivalent firmware-selecting command is:
-
-```sh
-bash /home/iscle/mhi2-audi-port/qemu/tools/mhi2/run_ui.sh --firmware audi-a3
+bash tools/mhi2/run_ui.sh --firmware audi-a3 --media /path/to/prepared-audi-media
 ```
 
 Use `--firmware vw` for the existing Volkswagen media, or `--headless` for
 console testing. `--media /path/to/media` selects another prepared directory;
-its manifest must match the selected firmware train. The default Audi media is
-`/home/iscle/mhi2-audi-port/media/audi-a3`. Closing the window stops the session.
+its manifest must match the selected firmware train. An explicit media
+directory is required. Closing the window stops the session.
 The NOR/eMMC images run as temporary snapshots.
 
 Audi uses its center-console controller (DSI FCC keyboard 1). The viewer shows
@@ -207,7 +201,7 @@ bash ../audi-build/run.sh
 
 The generated launcher remembers the Python environment and source checkout,
 and selects its own QEMU, host bridge, media and metadata. Keep the checkout
-and its virtual environment in place. It does not read `/home/iscle` paths.
+and its virtual environment in place. No developer workstation paths are required.
 For a machine without a desktop window, use `--headless`; a working EGL driver
 is still required. Do not run two sessions at once: the emulator uses shared
 `/tmp/mhi2-*` transports protected by a session lock.

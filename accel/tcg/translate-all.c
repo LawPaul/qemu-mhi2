@@ -623,16 +623,96 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
  * Called by generic code at e.g. cpu reset after cpu creation,
  * therefore we must be prepared to allocate the jump cache.
  */
+static void tcg_clear_jmp_cache_bank(CPUJumpCache *jc)
+{
+    /*
+     * Only the owning vCPU reads valid entries; other threads clear banks
+     * while the owner is stopped or is about to resync, so a vectorised
+     * clear is as safe as per-entry stores and several times faster.
+     */
+    memset(jc->array, 0, sizeof(jc->array));
+}
+
 void tcg_flush_jmp_cache(CPUState *cpu)
 {
-    CPUJumpCache *jc = cpu->tb_jmp_cache;
+
+    CPUJumpCacheSet *set = cpu->tb_jmp_cache_set;
+    CPUJumpCache *jc = qatomic_read(&cpu->tb_jmp_cache);
+    uint32_t gen;
 
     /* During early initialization, the cache may not yet be allocated. */
-    if (unlikely(jc == NULL)) {
+    if (unlikely(set == NULL || jc == NULL)) {
         return;
     }
 
-    for (int i = 0; i < TB_JMP_CACHE_SIZE; i++) {
-        qatomic_set(&jc->array[i].tb, NULL);
+    gen = qatomic_fetch_inc(&set->gen) + 1;
+    tcg_clear_jmp_cache_bank(jc);
+    if (qemu_cpu_is_self(cpu)) {
+        set->bank_gen[set->current] = gen;
     }
+}
+
+/*
+ * A TLBIASID invalidates only the translations of one ASID: clear the
+ * active bank, and forget saved banks whose tag may name @asid.  A tag
+ * holds either the CONTEXTIDR ASIDs in bits 15:0 or four TTBR ASIDs.
+ */
+void tcg_flush_jmp_cache_asid(CPUState *cpu, uint32_t asid)
+{
+    CPUJumpCacheSet *set = cpu->tb_jmp_cache_set;
+    unsigned i;
+
+    if (unlikely(set == NULL || cpu->tb_jmp_cache == NULL)) {
+        return;
+    }
+    tcg_clear_jmp_cache_bank(cpu->tb_jmp_cache);
+    for (i = 0; i < TB_JMP_CACHE_BANKS; i++) {
+        uint64_t tag = set->tag[i];
+
+        if (set->used[i] && i != set->current &&
+            (tag == UINT64_MAX || (tag & 0xff) == asid ||
+             ((tag >> 8) & 0xff) == asid || ((tag >> 16) & 0xff) == asid ||
+             ((tag >> 32) & 0xff) == asid || ((tag >> 48) & 0xff) == asid)) {
+            set->used[i] = false;
+        }
+    }
+}
+
+/*
+ * Select the jump-cache bank for translation context @tag.  Must be
+ * called by @cpu itself, together with a flush of its softmmu TLB.
+ */
+void tcg_switch_jmp_cache(CPUState *cpu, uint64_t tag)
+{
+    CPUJumpCacheSet *set = cpu->tb_jmp_cache_set;
+    uint32_t gen;
+    unsigned i;
+
+    assert(qemu_cpu_is_self(cpu));
+    if (unlikely(set == NULL)) {
+        return;
+    }
+
+    gen = qatomic_read(&set->gen);
+    for (i = 0; i < TB_JMP_CACHE_BANKS; i++) {
+        if (set->used[i] && set->tag[i] == tag) {
+            break;
+        }
+    }
+    if (i == TB_JMP_CACHE_BANKS) {
+        i = set->next_victim;
+        if (i == set->current) {
+            i = (i + 1) % TB_JMP_CACHE_BANKS;
+        }
+        set->next_victim = (i + 1) % TB_JMP_CACHE_BANKS;
+        set->used[i] = true;
+        set->tag[i] = tag;
+        set->bank_gen[i] = gen - 1;
+    }
+    if (set->bank_gen[i] != gen) {
+        tcg_clear_jmp_cache_bank(&set->bank[i]);
+        set->bank_gen[i] = gen;
+    }
+    set->current = i;
+    qatomic_set(&cpu->tb_jmp_cache, &set->bank[i]);
 }

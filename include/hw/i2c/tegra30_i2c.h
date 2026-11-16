@@ -61,6 +61,7 @@
 #define I2C_STATUS_BUSY           (1u << 8)
 
 #define TYPE_TEGRA30_I2C    "tegra30-i2c"
+#define TYPE_TEGRA124_I2C   "tegra124-i2c"
 OBJECT_DECLARE_SIMPLE_TYPE(Tegra30I2CState, TEGRA30_I2C)
 
 struct Tegra30I2CState {
@@ -71,10 +72,12 @@ struct Tegra30I2CState {
     MemoryRegion iomem;
     I2CBus *bus;
     qemu_irq irq;
+    bool tegra124;
 
     uint32_t packet_header[3];
     uint32_t packet_words;
     uint32_t packet_remaining;
+    uint32_t packet_discard;
     uint32_t rx_count;
     uint32_t rx_pos;
     uint8_t rx_fifo[32];

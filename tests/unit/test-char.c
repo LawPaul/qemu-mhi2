@@ -935,6 +935,39 @@ static void char_pipe_test(void)
     g_assert_cmpint(fe.read_count, ==, 8);
     g_assert_cmpstr(fe.read_buf, ==, "pipe-in");
 
+    for (unsigned capacity = 0; capacity < 2; capacity++) {
+        GMainContext *context = g_main_context_default();
+        GPollFD *pollfds;
+        int priority, timeout, nfds;
+
+        memset(&fe, 0, sizeof(fe));
+        fd = open(in, O_WRONLY);
+        g_assert_cmpint(write(fd, "pipe-in", 8), ==, 8);
+        close(fd);
+        g_assert_true(g_main_context_acquire(context));
+        g_main_context_prepare(context, &priority);
+        nfds = g_main_context_query(context, priority, &timeout, NULL, 0);
+        pollfds = g_new0(GPollFD, nfds);
+        g_assert_cmpint(g_main_context_query(context, priority, &timeout,
+                                            pollfds, nfds), ==, nfds);
+        g_assert_cmpint(g_poll(pollfds, nfds, 0), >, 0);
+        g_assert_true(g_main_context_check(context, priority, pollfds, nfds));
+        /* Synchronous frontend input can consume space after the poll. */
+        fe.read_count = sizeof(fe.read_buf) - capacity;
+        g_main_context_dispatch(context);
+        g_main_context_release(context);
+        g_free(pollfds);
+
+        g_assert_cmpint(fe.read_count, ==, sizeof(fe.read_buf));
+        if (capacity) {
+            g_assert_cmpint(fe.read_buf[sizeof(fe.read_buf) - 1], ==, 'p');
+        }
+        memset(&fe, 0, sizeof(fe));
+        main_loop();
+        g_assert_cmpint(fe.read_count, ==, 8 - capacity);
+        g_assert_cmpstr(fe.read_buf, ==, "pipe-in" + capacity);
+    }
+
     qemu_chr_fe_deinit(&c, true);
 
     g_assert(g_unlink(in) == 0);

@@ -4,13 +4,35 @@ static void native_register_api(u32 api);
 void NvEglRegClientApi(unsigned api, void *unused)
 { (void)unused;native_register_api(api); }
 
+#ifdef GLBRIDGE_MH2P_SCREEN
+#define egl_error (current_record()->egl_error)
+#else
 static i32 egl_error = 0x3000;
+#endif
 static u32 bound_api = 0x30a0;
+#ifdef GLBRIDGE_MH2P_SCREEN
+static int screen_images_live(void);
+static void screen_image_reset(void);
+static int screen_image_storage(u32 target);
+struct ScreenWindow;
+static int screen_image_surface_current(struct ScreenWindow *window);
+static int screen_image_surface_unbind(struct ScreenWindow *window);
+static int screen_image_surface_release(struct ScreenWindow *window);
+static int screen_image_sync(void);
+#include "screen_window.h"
+#include "screen_egl.h"
+#include "screen_texture.h"
+#include "screen_image.h"
+#else
 #include "native_window.h"
 #include "native_encoder.h"
+#endif
 u32 eglQueryAPI(void) { return bound_api; }
 u32 eglQueryContext(void *display,void *ctx,i32 attr,i32 *value)
 {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    SCREEN_EGL_RETURN(u32, screen_query_context(display, ctx, attr, value));
+#else
     if(!display || !ctx || !value){egl_error=0x3006;return 0;}
     switch(attr){
     case 0x3028:*value=1;break; /* EGL_CONFIG_ID */
@@ -20,6 +42,7 @@ u32 eglQueryContext(void *display,void *ctx,i32 attr,i32 *value)
     default:egl_error=0x3004;return 0;
     }
     return 1;
+#endif
 }
 u32 eglSurfaceAttrib(void *display,void *surface,i32 attr,i32 value)
 {
@@ -33,7 +56,13 @@ u32 eglBindTexImage(void *d,void *s,i32 buffer){egl_error=0x3009;return 0;}
 u32 eglReleaseTexImage(void *d,void *s,i32 buffer){egl_error=0x3009;return 0;}
 u32 eglCopyBuffers(void *d,void *s,void *target){egl_error=0x300a;return 0;}
 void *eglCreatePixmapSurface(void *d,void *cfg,void *pix,const i32 *attrs)
-{egl_error=0x300a;return 0;}
+{
+#ifdef GLBRIDGE_MH2P_SCREEN
+    SCREEN_EGL_RETURN(void *, screen_create_pixmap_surface(d, cfg, pix, attrs));
+#else
+    egl_error=0x300a;return 0;
+#endif
+}
 void *eglCreatePbufferFromClientBuffer(void *d,u32 type,void *buf,void *cfg,const i32 *attrs)
 {egl_error=0x3009;return 0;}
 
@@ -43,6 +72,9 @@ void *eglGetPlatformDisplay(u32 p, void *d, const void *a) { (void)p;(void)d;(vo
 
 u32 eglInitialize(void *dpy, i32 *major, i32 *minor)
 {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    SCREEN_EGL_RETURN(u32, screen_initialize(dpy, major, minor));
+#else
     (void)dpy;
     if (major) *major = 1;
     if (minor) *minor = 4;
@@ -52,6 +84,7 @@ u32 eglInitialize(void *dpy, i32 *major, i32 *minor)
     if (wh[1] <= 0) wh[1] = 480;
     emit_iv(1, wh, 2);
     return 1;
+#endif
 }
 
 u32 eglGetConfigs(void *dpy, void **configs, i32 size, i32 *num)
@@ -69,11 +102,24 @@ u32 eglGetConfigAttrib(void *dpy, void *cfg, i32 attr, i32 *value)
     case 0x3025: v = 24; break;
     case 0x3026: v = 8;  break;
     case 0x3028: v = 1;  break;
-    case 0x302E: v = 1;  break;
+    case 0x302E:
+#ifdef GLBRIDGE_MH2P_SCREEN
+        v = 8;
+#else
+        v = 1;
+#endif
+        break;
     case 0x302F: v = 0;  break;
-    case 0x3033: v = 0x0005; break;
-    case 0x3040: v = 0x0044; break;
-    case 0x3042: v = 0x0044; break;
+    case 0x3033:
+#ifdef GLBRIDGE_MH2P_SCREEN
+        v = 0x0007;
+#else
+        v = 0x0005;
+#endif
+        break;
+    case 0x3040: case 0x3042:
+        v = 0x0044;
+        break;
     case 0x303F: v = 0x308E; break;
     case 0x3027: v = 0x3038; break;
     default: v = 0; break;
@@ -83,16 +129,43 @@ u32 eglGetConfigAttrib(void *dpy, void *cfg, i32 attr, i32 *value)
 }
 
 void *eglCreateWindowSurface(void *dpy, void *cfg, void *win, const i32 *attr)
-{ (void)dpy;(void)cfg;(void)attr; return native_window_create(win); }
+{
+#ifdef GLBRIDGE_MH2P_SCREEN
+    SCREEN_EGL_RETURN(void *, screen_create_surface(dpy, cfg, win, attr, 0));
+#else
+    (void)dpy;(void)cfg;(void)attr; return native_window_create(win);
+#endif
+}
 void *eglCreatePbufferSurface(void *dpy, void *cfg, const i32 *attr)
-{ (void)dpy;(void)cfg;(void)attr; return (void *)1; }
+{
+#ifdef GLBRIDGE_MH2P_SCREEN
+    SCREEN_EGL_RETURN(void *, screen_create_surface(dpy, cfg, 0, attr, 1));
+#else
+    (void)dpy;(void)cfg;(void)attr; return (void *)1;
+#endif
+}
 void *eglCreateContext(void *dpy, void *cfg, void *share, const i32 *attr)
-{ (void)dpy;(void)cfg;(void)share;(void)attr; return (void *)1; }
+{
+#ifdef GLBRIDGE_MH2P_SCREEN
+    SCREEN_EGL_RETURN(void *, screen_create_context(dpy, cfg, share, attr));
+#else
+    (void)dpy;(void)cfg;(void)share;(void)attr; return (void *)1;
+#endif
+}
 u32 eglMakeCurrent(void *dpy, void *draw, void *read, void *ctx)
-{ (void)dpy;(void)draw;(void)read;(void)ctx; return 1; }
+{
+#ifdef GLBRIDGE_MH2P_SCREEN
+    SCREEN_EGL_RETURN(u32, screen_make_current(dpy, draw, read, ctx));
+#else
+    (void)dpy;(void)draw;(void)read;(void)ctx; return 1;
+#endif
+}
 
 u32 eglQuerySurface(void *dpy, void *surf, i32 attr, i32 *value)
 {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    SCREEN_EGL_RETURN(u32, screen_query_surface(dpy, surf, attr, value));
+#else
     (void)dpy;(void)surf;
     const char *ws = getenv("GLBRIDGE_W"), *hs = getenv("GLBRIDGE_H");
     i32 w = ws ? atoi(ws) : 800, h = hs ? atoi(hs) : 480;
@@ -108,18 +181,67 @@ u32 eglQuerySurface(void *dpy, void *surf, i32 attr, i32 *value)
     else if (attr == 0x3056) v = h;   /* EGL_HEIGHT */
     if (value) *value = v;
     return 1;
+#endif
 }
-u32 eglSwapBuffers(void *dpy, void *surf) { (void)dpy; native_window_swap(surf); rec(5, 0); return 1; }
+u32 eglSwapBuffers(void *dpy, void *surf)
+{
+    (void)dpy;
+#ifdef GLBRIDGE_MH2P_SCREEN
+    SCREEN_EGL_RETURN(u32, screen_swap(dpy, surf));
+#else
+    native_window_swap(surf);
+    rec(5, 0);
+    return 1;
+#endif
+}
 u32 eglSwapInterval(void *dpy, i32 n) { (void)dpy;(void)n; return 1; }
 i32 eglGetError(void) {i32 e=egl_error;egl_error=0x3000;return e;}
-u32 eglTerminate(void *dpy) { (void)dpy; return 1; }
-u32 eglDestroySurface(void *dpy, void *s) { (void)dpy;native_window_destroy(s);return 1; }
-u32 eglDestroyContext(void *dpy, void *c) { (void)dpy;(void)c; return 1; }
-u32 eglReleaseThread(void) { return 1; }
+u32 eglTerminate(void *dpy) {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    SCREEN_EGL_RETURN(u32, screen_terminate(dpy));
+#else
+    (void)dpy; return 1;
+#endif
+}
+u32 eglDestroySurface(void *dpy, void *s)
+{
+    (void)dpy;
+#ifdef GLBRIDGE_MH2P_SCREEN
+    SCREEN_EGL_RETURN(u32, screen_destroy_surface(dpy, s));
+#else
+    native_window_destroy(s);
+    return 1;
+#endif
+}
+u32 eglDestroyContext(void *dpy, void *c) {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    SCREEN_EGL_RETURN(u32, screen_destroy_context(dpy, c));
+#else
+    (void)dpy;(void)c; return 1;
+#endif
+}
+u32 eglReleaseThread(void) {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    if (!current_record()->egl_context) return 1;
+    SCREEN_EGL_RETURN(u32, screen_make_current((void *)1, 0, 0, 0));
+#else
+    return 1;
+#endif
+}
 u32 eglBindAPI(u32 api) {if(api!=0x30a0){egl_error=0x300c;return 0;}bound_api=api;return 1;}
 u32 eglWaitGL(void) { return 1; }
 u32 eglWaitNative(i32 e) { (void)e; return 1; }
-const char *eglQueryString(void *dpy, i32 name) { (void)dpy; if(name==0x3055)return "EGL_KHR_image EGL_KHR_image_base EGL_NV_system_time "; return "glshim-fwd"; }
+const char *eglQueryString(void *dpy, i32 name) {
+    (void)dpy;
+    if(name==0x3055) {
+#ifdef GLBRIDGE_MH2P_SCREEN
+        return "EGL_NV_system_time EGL_KHR_surfaceless_context ";
+#else
+        return "EGL_KHR_image EGL_KHR_image_base EGL_NV_system_time ";
+#endif
+    }
+    return "glshim-fwd";
+}
 /* EGL_NV_system_time uses the guest's monotonic nanosecond clock. */
 extern int ClockTime(int, const unsigned long long *, unsigned long long *);
 unsigned long long eglGetSystemTimeFrequencyNV(void) { return 1000000000ULL; }
@@ -130,16 +252,47 @@ unsigned long long eglGetSystemTimeNV(void)
     return now;
 }
 void *eglGetProcAddress(const char *n);
-void *eglGetCurrentDisplay(void) { return (void *)1; }
-void *eglGetCurrentContext(void) { return (void *)1; }
-void *eglGetCurrentSurface(i32 r) { (void)r; return (void *)1; }
+void *eglGetCurrentDisplay(void) {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    return current_record()->egl_context ? (void *)1 : 0;
+#else
+    return (void *)1;
+#endif
+}
+void *eglGetCurrentContext(void) {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    return current_record()->egl_context;
+#else
+    return (void *)1;
+#endif
+}
+void *eglGetCurrentSurface(i32 r) {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    if (r == 0x3059) return current_record()->egl_draw;
+    if (r == 0x305a) return current_record()->egl_read;
+    screen_failure("invalid current-surface selector", 0x300c);
+    return 0;
+#else
+    (void)r; return (void *)1;
+#endif
+}
 
 /* ---------------- GLES2 frame ---------------- */
 void glViewport(i32 x, i32 y, i32 w, i32 h) { i32 p[4] = { x, y, w, h }; emit_iv(2, p, 4); }
 void glClearColor(float r, float g, float b, float a) { float p[4] = { r, g, b, a }; emit_iv(3, (i32 *)p, 4); }
-void glClear(u32 mask) { emit_iv(4, (i32 *)&mask, 1); }
-void glFinish(void) { rec(6, 0); }
-void glFlush(void) { rec(6, 0); }
+void glClear(u32 mask) {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    if ((mask & 0x4000) && !screen_image_before_draw(0)) return;
+#endif
+    emit_iv(4, (i32 *)&mask, 1);
+}
+void glFinish(void) {
+    rec(6, 0);
+#ifdef GLBRIDGE_MH2P_SCREEN
+    screen_image_finish();
+#endif
+}
+void glFlush(void) { glFinish(); }
 
 /* ---------------- shaders / programs ---------------- */
 u32 glCreateShader(u32 type) { u32 id = __sync_add_and_fetch(&g_id,1); u32 p[2] = { id, type }; emit_iv(7, (i32 *)p, 2); return id; }
@@ -159,11 +312,13 @@ void glShaderSource(u32 sh, i32 count, const char *const *str, const i32 *len)
 void glCompileShader(u32 sh) { emit_iv(9, (i32 *)&sh, 1); }
 u32 glCreateProgram(void) { u32 id = __sync_add_and_fetch(&g_id,1); emit_iv(10, (i32 *)&id, 1); return id; }
 void glAttachShader(u32 pid, u32 sid) { u32 p[2] = { pid, sid }; emit_iv(11, (i32 *)p, 2); }
-void glLinkProgram(u32 pid) { emit_iv(12, (i32 *)&pid, 1); }
+static volatile u32 loc_generation = 1;
+void glLinkProgram(u32 pid) { __sync_add_and_fetch(&loc_generation, 1); emit_iv(12, (i32 *)&pid, 1); }
 void glUseProgram(u32 pid) { emit_iv(13, (i32 *)&pid, 1); }
 void glBindAttribLocation(u32 pid, u32 index, const char *name)
 {
     u32 l = (u32)strlen(name); u32 h[3] = { pid, index, l };
+    __sync_add_and_fetch(&loc_generation, 1);
     rec(14, 12 + l); PART(h, 12); PART(name, l);
 }
 void glDeleteShader(u32 s) { (void)s; }
@@ -184,7 +339,7 @@ void glGenBuffers(i32 n, u32 *b)
     u32 cnt = (u32)n; PART(&cnt, 4);
     for (i32 i = 0; i < n; i++) { b[i] = __sync_add_and_fetch(&g_id,1); PART(&b[i], 4); }
 }
-void glBindBuffer(u32 target, u32 id) { struct Record *r=current_record();if(target==0x8892)r->array_buffer=id;if(target==0x8893)r->element_buffer=id; u32 p[2] = { target, id }; emit_iv(16, (i32 *)p, 2); }
+void glBindBuffer(u32 target, u32 id) { struct Record *r=current_graphics_record();if(target==0x8892)r->array_buffer=id;if(target==0x8893)r->element_buffer=id; u32 p[2] = { target, id }; emit_iv(16, (i32 *)p, 2); }
 void glBufferData(u32 target, i32 size, const void *data, u32 usage)
 {
     u32 sz = size < 0 ? 0 : (u32)size;
@@ -202,12 +357,23 @@ void glBufferSubData(u32 target, i32 offset, i32 size, const void *data)
 static void delete_objects(u32 kind, i32 count, const u32 *ids)
 {
     if (count <= 0 || !ids) return;
+#ifdef GLBRIDGE_MH2P_SCREEN
+    SCREEN_IMAGE_LOCK();
+    if (!screen_image_delete(kind, count, ids, 0)) {
+        SCREEN_IMAGE_UNLOCK();
+        return;
+    }
+#endif
     u32 header[2] = {kind, (u32)count};
     rec(130, 8 + (u32)count * 4); PART(header, 8); PART(ids, (u32)count * 4);
+#ifdef GLBRIDGE_MH2P_SCREEN
+    screen_image_delete(kind, count, ids, 1);
+    SCREEN_IMAGE_UNLOCK();
+#endif
 }
 void glDeleteBuffers(i32 n, const u32 *ids)
 {
-    struct Record *r = current_record();
+    struct Record *r = current_graphics_record();
     for (i32 i = 0; ids && i < n; i++) {
         if (r->array_buffer == ids[i]) r->array_buffer = 0;
         if (r->element_buffer == ids[i]) r->element_buffer = 0;
@@ -221,14 +387,14 @@ void glDeleteBuffers(i32 n, const u32 *ids)
 void glVertexAttribPointer(u32 index, i32 size, u32 type, u32 norm, i32 stride, const void *ptr)
 {
     if(index>=16 || size<1 || size>4 || stride<0)abort();
-    struct Record *r=current_record();struct ClientAttrib *a=&r->attribs[index];
+    struct Record *r=current_graphics_record();struct ClientAttrib *a=&r->attribs[index];
     a->size=size;a->type=type;a->norm=norm;a->stride=stride;a->pointer=ptr;a->buffer=r->array_buffer;
     if(!a->buffer)return; /* Guest pointers are copied at draw time. */
     u32 p[6] = { index, (u32)size, type, norm ? 1u : 0u, (u32)stride, (u32)(unsigned long)ptr };
     emit_iv(19, (i32 *)p, 6);
 }
-void glEnableVertexAttribArray(u32 index) { if(index<16)current_record()->attribs[index].enabled=1; emit_iv(20, (i32 *)&index, 1); }
-void glDisableVertexAttribArray(u32 index) { if(index<16)current_record()->attribs[index].enabled=0; emit_iv(21, (i32 *)&index, 1); }
+void glEnableVertexAttribArray(u32 index) { if(index<16)current_graphics_record()->attribs[index].enabled=1; emit_iv(20, (i32 *)&index, 1); }
+void glDisableVertexAttribArray(u32 index) { if(index<16)current_graphics_record()->attribs[index].enabled=0; emit_iv(21, (i32 *)&index, 1); }
 
 /* ---------------- uniforms ---------------- */
 static void uni_vec(u32 op, i32 loc, i32 count, u32 per, const float *v)
@@ -263,14 +429,14 @@ static unsigned scalar_bytes(u32 type)
 }
 static int has_client_arrays(void)
 {
-    struct Record *r=current_record();
+    struct Record *r=current_graphics_record();
     for(unsigned i=0;i<16;i++)
         if(r->attribs[i].enabled && !r->attribs[i].buffer)return 1;
     return 0;
 }
 static void upload_client_arrays(unsigned vertices)
 {
-    struct Record *r=current_record();
+    struct Record *r=current_graphics_record();
     for(unsigned i=0;i<16;i++){
         struct ClientAttrib *a=&r->attribs[i];
         if(!a->enabled||a->buffer||!vertices)continue;
@@ -283,15 +449,21 @@ static void upload_client_arrays(unsigned vertices)
 }
 void glDrawArrays(u32 mode, i32 first, i32 count)
 {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    if (!screen_image_before_draw(1)) return;
+#endif
     if(first<0 || count<0 || (u32)count>0x7fffffffU-(u32)first)abort();
     if(count)upload_client_arrays((u32)first+count);
     i32 p[3]={(i32)mode,first,count};emit_iv(31,p,3);
 }
 void glDrawElements(u32 mode, i32 count, u32 type, const void *indices)
 {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    if (!screen_image_before_draw(1)) return;
+#endif
     if(count<0 || (type!=0x1401 && type!=0x1403 && type!=0x1405))abort();
     if(!count)return;
-    struct Record *r=current_record();
+    struct Record *r=current_graphics_record();
     unsigned n=scalar_bytes(type),maximum=0;
     if(!r->element_buffer){
         if(!indices || (unsigned long long)count*n>16*1024*1024-16)abort();
@@ -351,54 +523,140 @@ static u32 tex_bytes(u32 fmt, u32 type, i32 w, i32 h)
 }
 void glTexImage2D(u32 target, i32 level, i32 ifmt, i32 w, i32 h, i32 border, u32 fmt, u32 type, const void *data)
 {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    if (!screen_image_storage(target)) return;
+#endif
     u32 sz = data ? tex_bytes(fmt, type, w, h) : 0;
     u32 hd[9] = { target, (u32)level, (u32)ifmt, (u32)w, (u32)h, (u32)border, fmt, type, sz };
     rec(52, 36 + sz); PART(hd, 36); if (sz) PART(data, sz);
 }
 void glTexParameteri(u32 target, u32 pname, i32 param) { i32 p[3] = { (i32)target, (i32)pname, param }; emit_iv(53, p, 3); }
 void glTexParameterf(u32 target, u32 pname, float param) { u32 h[2] = { target, pname }; rec(58, 12); PART(h, 8); PART(&param, 4); }
-void glActiveTexture(u32 texture) { emit_iv(54, (i32 *)&texture, 1); }
+void glActiveTexture(u32 texture) {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    if (texture < 0x84c0 || texture >= 0x84c0 + 32) {
+        screen_gl_failure("unsupported texture unit", 0x500);
+        return;
+    }
+    screen_image_unit = texture - 0x84c0;
+#endif
+    emit_iv(54, (i32 *)&texture, 1);
+}
 void glPixelStorei(u32 pname, i32 param) { i32 p[2] = { (i32)pname, param }; emit_iv(55, p, 2); }
 void glTexSubImage2D(u32 target, i32 level, i32 x, i32 y, i32 w, i32 h, u32 fmt, u32 type, const void *data)
 {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    if (!screen_image_storage(target)) return;
+#endif
     u32 sz = data ? tex_bytes(fmt, type, w, h) : 0;
     u32 hd[8] = { target, (u32)level, (u32)x, (u32)y, (u32)w, (u32)h, fmt, type };
     /* pack sz as a 9th word for symmetry with glhost */
     u32 hd2[9]; for (int i=0;i<8;i++) hd2[i]=hd[i]; hd2[8]=sz;
     rec(56, 36 + sz); PART(hd2, 36); if (sz) PART(data, sz);
 }
-void glGenerateMipmap(u32 target) { emit_iv(57, (i32 *)&target, 1); }
+void glGenerateMipmap(u32 target) {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    if (!screen_image_storage(target)) return;
+#endif
+    emit_iv(57, (i32 *)&target, 1);
+}
 
 /* ---------------- synchronous getters ---------------- */
-i32 glGetAttribLocation(u32 pid, const char *name)
+/*
+ * Locations are stable until the program is relinked or an attribute binding
+ * changes, so successful lookups are cached and skip the host round trip.
+ */
+#define LOC_CACHE_SIZE 512
+static struct { u32 gen, pid, kind, hash; i32 loc; char name[48]; } loc_cache[LOC_CACHE_SIZE];
+static volatile int loc_lock;
+
+static i32 gl_get_location(u32 kind, u32 pid, const char *name)
 {
-    u32 l = (u32)strlen(name); u32 h[2] = { pid, l };
-    rec(100, 8 + l); PART(h, 8); PART(name, l);
-    i32 loc = -1; recv_all(&loc, 4); return loc;
+    u32 l = (u32)strlen(name), hash = pid * 2654435761u + kind;
+    for (u32 i = 0; i < l; i++) hash = hash * 31 + (unsigned char)name[i];
+    u32 slot = hash % LOC_CACHE_SIZE, gen = loc_generation;
+    i32 loc = -1;
+    int cacheable = l < sizeof(loc_cache[0].name);
+    if (cacheable) {
+        while (__sync_lock_test_and_set(&loc_lock, 1)) {}
+        if (loc_cache[slot].gen == gen && loc_cache[slot].hash == hash &&
+            loc_cache[slot].pid == pid && loc_cache[slot].kind == kind &&
+            !strcmp(loc_cache[slot].name, name)) {
+            loc = loc_cache[slot].loc;
+        }
+        __sync_lock_release(&loc_lock);
+        if (loc >= 0) return loc;
+    }
+    u32 h[2] = { pid, l };
+    rec(kind == 0 ? 100 : 101, 8 + l); PART(h, 8); PART(name, l);
+    loc = -1; recv_all(&loc, 4);
+    if (cacheable && loc >= 0 && gen == loc_generation) {
+        while (__sync_lock_test_and_set(&loc_lock, 1)) {}
+        loc_cache[slot].gen = gen; loc_cache[slot].pid = pid;
+        loc_cache[slot].kind = kind; loc_cache[slot].hash = hash;
+        loc_cache[slot].loc = loc;
+        for (u32 i = 0; i <= l; i++) loc_cache[slot].name[i] = name[i];
+        __sync_lock_release(&loc_lock);
+    }
+    return loc;
 }
-i32 glGetUniformLocation(u32 pid, const char *name)
-{
-    u32 l = (u32)strlen(name); u32 h[2] = { pid, l };
-    rec(101, 8 + l); PART(h, 8); PART(name, l);
-    i32 loc = -1; recv_all(&loc, 4); return loc;
-}
+i32 glGetAttribLocation(u32 pid, const char *name) { return gl_get_location(0, pid, name); }
+i32 glGetUniformLocation(u32 pid, const char *name) { return gl_get_location(1, pid, name); }
 
 /* misc still faked locally */
-i32 glGetError(void) {rec(105,0);i32 e=0;recv_all(&e,4);return e;}
+i32 glGetError(void) {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    if (screen_gl_error) {
+        i32 e = screen_gl_error;
+        screen_gl_error = 0;
+        return e;
+    }
+#endif
+    rec(105,0);i32 e=0;recv_all(&e,4);return e;
+}
 const char *glGetString(u32 name)
 {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    if (current_record()->egl_context && current_screen_context()->version == 3) {
+        if (name == 0x1f02) return "OpenGL ES 3.0 (experimental glshim-fwd)";
+        if (name == 0x8b8c) return "OpenGL ES GLSL ES 3.00";
+    }
+#endif
     switch (name) {
     case 0x1F00: return "glshim-fwd";
     case 0x1F01: return "glshim-fwd-renderer";
     case 0x1F02: return "OpenGL ES 2.0 (glshim-fwd)";
     case 0x8B8C: return "OpenGL ES GLSL ES 1.00";
-    case 0x1F03: return "";
+    case 0x1F03:
+#ifdef GLBRIDGE_MH2P_SCREEN
+        return screen_astc_supported() ?
+            "GL_KHR_texture_compression_astc_ldr" : "";
+#else
+        return "";
+#endif
     default:     return "";
     }
 }
 void glGenFramebuffers(i32 n,u32 *objects){if(n<0||!objects)return;rec(78,4+4*n);PART(&n,4);for(i32 i=0;i<n;i++){objects[i]=__sync_add_and_fetch(&g_id,1);PART(&objects[i],4);}}
 void glGenRenderbuffers(i32 n,u32 *objects){if(n<0||!objects)return;rec(79,4+4*n);PART(&n,4);for(i32 i=0;i<n;i++){objects[i]=__sync_add_and_fetch(&g_id,1);PART(&objects[i],4);}}
 void glGetIntegerv(u32 pname, i32 *p) {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    if (pname == 0x86a2 || pname == 0x86a3 || pname == 0x821d) {
+        int supported = screen_astc_supported();
+        if (!p) return;
+        if (pname == 0x86a2) *p = supported ? 28 : 0;
+        else if (pname == 0x821d) *p = supported;
+        else if (supported) {
+            for (unsigned i = 0; i < 14; i++) {
+                p[i] = 0x93b0 + i;
+                p[14 + i] = 0x93d0 + i;
+            }
+        }
+        return;
+    }
+    if (pname == 0x87fe) { if (p) *p = 0; return; }
+    if (pname == 0x87ff) return;
+#endif
     emit_iv(104,(i32 *)&pname,1);i32 v[16];if(recv_all(v,64)<0)return;
     unsigned n=(pname==0xba2 || pname==0xc10 || pname==0xc23)?4:(pname==0xd3a?2:1);
     if(p)for(unsigned i=0;i<n;i++)p[i]=v[i];
@@ -417,7 +675,13 @@ int slog2_register(void) { return 0; }
 
 /* ---- noop stubs for the rest of the exported ABI ---- */
 int glBeginPerfMonitorAMD(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glBeginPerfMonitorAMD\n";write(2,msg,sizeof(msg)-1);} return 0; }
-void glBindFramebuffer(u32 target,u32 object){u32 p[]={(u32)target,(u32)object};emit_iv(60,(i32 *)p,2);}
+void glBindFramebuffer(u32 target,u32 object){
+#ifdef GLBRIDGE_MH2P_SCREEN
+    if (target == 0x8d40 || target == 0x8ca9) screen_image_draw_fbo = object;
+    if (target == 0x8d40 || target == 0x8ca8) screen_image_read_fbo = object;
+#endif
+    u32 p[]={(u32)target,(u32)object};emit_iv(60,(i32 *)p,2);
+}
 void glBindRenderbuffer(u32 target,u32 object){u32 p[]={(u32)target,(u32)object};emit_iv(61,(i32 *)p,2);}
 int glBindVertexArrayOES(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glBindVertexArrayOES\n";write(2,msg,sizeof(msg)-1);} return 0; }
 void glBlendColor(float r,float g,float b,float a){float v[4]={r,g,b,a};rec(86,16);PART(v,16);}
@@ -427,9 +691,13 @@ void glBlendFuncSeparate(u32 sr,u32 dr,u32 sa,u32 da){u32 p[]={(u32)sr,(u32)dr,(
 u32 glCheckFramebufferStatus(u32 target){emit_iv(109,(i32 *)&target,1);u32 out=0;recv_all(&out,4);return out;}
 void glClearStencil(i32 value){u32 p[]={(u32)value};emit_iv(67,(i32 *)p,1);}
 void glColorMask(u32 r,u32 g,u32 b,u32 a){u32 p[]={(u32)r,(u32)g,(u32)b,(u32)a};emit_iv(66,(i32 *)p,4);}
+#ifndef GLBRIDGE_MH2P_SCREEN
 int glCompressedTexImage2D(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glCompressedTexImage2D\n";write(2,msg,sizeof(msg)-1);} return 0; }
+#endif
 int glCompressedTexImage3DOES(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glCompressedTexImage3DOES\n";write(2,msg,sizeof(msg)-1);} return 0; }
+#ifndef GLBRIDGE_MH2P_SCREEN
 int glCompressedTexSubImage2D(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glCompressedTexSubImage2D\n";write(2,msg,sizeof(msg)-1);} return 0; }
+#endif
 int glCompressedTexSubImage3DOES(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glCompressedTexSubImage3DOES\n";write(2,msg,sizeof(msg)-1);} return 0; }
 int glCopyTexImage2D(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glCopyTexImage2D\n";write(2,msg,sizeof(msg)-1);} return 0; }
 int glCopyTexSubImage2D(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glCopyTexSubImage2D\n";write(2,msg,sizeof(msg)-1);} return 0; }
@@ -443,7 +711,14 @@ int glDeleteVertexArraysOES(void) { static int seen; if(!seen){seen=1;const char
 void glDepthRangef(float near,float far){float v[2]={near,far};rec(85,8);PART(v,8);}
 int glDisableDriverControlQCOM(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glDisableDriverControlQCOM\n";write(2,msg,sizeof(msg)-1);} return 0; }
 int glDiscardFramebufferEXT(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glDiscardFramebufferEXT\n";write(2,msg,sizeof(msg)-1);} return 0; }
+#ifdef GLBRIDGE_MH2P_SCREEN
+void glEGLImageTargetRenderbufferStorageOES(u32 target, void *image)
+{
+    screen_gl_failure("native image renderbuffer imports are unsupported", 0x502);
+}
+#else
 int glEGLImageTargetRenderbufferStorageOES(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glEGLImageTargetRenderbufferStorageOES\n";write(2,msg,sizeof(msg)-1);} return 0; }
+#endif
 
 int glEnableDriverControlQCOM(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glEnableDriverControlQCOM\n";write(2,msg,sizeof(msg)-1);} return 0; }
 int glEndPerfMonitorAMD(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glEndPerfMonitorAMD\n";write(2,msg,sizeof(msg)-1);} return 0; }
@@ -461,8 +736,29 @@ int glExtGetTexturesQCOM(void) { static int seen; if(!seen){seen=1;const char ms
 int glExtIsProgramBinaryQCOM(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glExtIsProgramBinaryQCOM\n";write(2,msg,sizeof(msg)-1);} return 0; }
 int glExtTexObjectStateOverrideiQCOM(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glExtTexObjectStateOverrideiQCOM\n";write(2,msg,sizeof(msg)-1);} return 0; }
 int glFinishFenceNV(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glFinishFenceNV\n";write(2,msg,sizeof(msg)-1);} return 0; }
-void glFramebufferRenderbuffer(u32 target,u32 attachment,u32 rbTarget,u32 object){u32 p[]={(u32)target,(u32)attachment,(u32)rbTarget,(u32)object};emit_iv(64,(i32 *)p,4);}
-void glFramebufferTexture2D(u32 target,u32 attachment,u32 textureTarget,u32 object,i32 level){u32 p[]={(u32)target,(u32)attachment,(u32)textureTarget,(u32)object,(u32)level};emit_iv(62,(i32 *)p,5);}
+void glFramebufferRenderbuffer(u32 target,u32 attachment,u32 rbTarget,u32 object){
+#ifdef GLBRIDGE_MH2P_SCREEN
+    SCREEN_IMAGE_LOCK();
+    int ok = screen_image_renderbuffer(target, attachment);
+    SCREEN_IMAGE_UNLOCK();
+    if (!ok) return;
+#endif
+    u32 p[]={(u32)target,(u32)attachment,(u32)rbTarget,(u32)object};emit_iv(64,(i32 *)p,4);
+}
+void glFramebufferTexture2D(u32 target,u32 attachment,u32 textureTarget,u32 object,i32 level){
+#ifdef GLBRIDGE_MH2P_SCREEN
+    SCREEN_IMAGE_LOCK();
+    int ok = screen_image_attachment(target, attachment, textureTarget, object, level);
+    if (ok) {
+        u32 p[] = {target, attachment, textureTarget, object, level,
+                    screen_texture_image(object) != 0};
+        emit_iv(62, (i32 *)p, attachment == 0x8ce0 ? 6 : 5);
+    }
+    SCREEN_IMAGE_UNLOCK();
+#else
+    u32 p[]={(u32)target,(u32)attachment,(u32)textureTarget,(u32)object,(u32)level};emit_iv(62,(i32 *)p,5);
+#endif
+}
 int glFramebufferTexture3DOES(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glFramebufferTexture3DOES\n";write(2,msg,sizeof(msg)-1);} return 0; }
 int glGenFencesNV(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glGenFencesNV\n";write(2,msg,sizeof(msg)-1);} return 0; }
 int glGenPerfMonitorsAMD(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glGenPerfMonitorsAMD\n";write(2,msg,sizeof(msg)-1);} return 0; }
@@ -529,7 +825,9 @@ int glIsVertexArrayOES(void) { static int seen; if(!seen){seen=1;const char msg[
 int glMapBufferOES(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glMapBufferOES\n";write(2,msg,sizeof(msg)-1);} return 0; }
 int glMultiDrawArraysEXT(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glMultiDrawArraysEXT\n";write(2,msg,sizeof(msg)-1);} return 0; }
 int glMultiDrawElementsEXT(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glMultiDrawElementsEXT\n";write(2,msg,sizeof(msg)-1);} return 0; }
+#ifndef GLBRIDGE_MH2P_SCREEN
 int glProgramBinaryOES(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glProgramBinaryOES\n";write(2,msg,sizeof(msg)-1);} return 0; }
+#endif
 void glReadPixels(i32 x,i32 y,i32 w,i32 h,u32 format,u32 type,void *pixels)
 {
     /* RGBA8 is the native CWM handoff format used by this bridge. */
@@ -544,12 +842,14 @@ int glSampleCoverage(void) { static int seen; if(!seen){seen=1;const char msg[]=
 void glScissor(i32 x,i32 y,i32 width,i32 height){u32 p[]={(u32)x,(u32)y,(u32)width,(u32)height};emit_iv(65,(i32 *)p,4);}
 int glSelectPerfMonitorCountersAMD(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glSelectPerfMonitorCountersAMD\n";write(2,msg,sizeof(msg)-1);} return 0; }
 int glSetFenceNV(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glSetFenceNV\n";write(2,msg,sizeof(msg)-1);} return 0; }
+#ifndef GLBRIDGE_MH2P_SCREEN
 void glShaderBinary(i32 count,const u32 *shaders,u32 format,const void *binary,i32 length)
 {
     if(count < 0 || length < 0) return;
     u32 h[3]={(u32)count,format,(u32)length};
     rec(110,12+4*count+length);PART(h,12);PART(shaders,4*count);PART(binary,length);
 }
+#endif
 int glStartTilingQCOM(void) { static int seen; if(!seen){seen=1;const char msg[]="glbridge: unsupported glStartTilingQCOM\n";write(2,msg,sizeof(msg)-1);} return 0; }
 void glStencilFunc(u32 func,i32 ref,u32 mask){u32 p[]={(u32)func,(u32)ref,(u32)mask};emit_iv(69,(i32 *)p,3);}
 void glStencilFuncSeparate(u32 face,u32 func,i32 ref,u32 mask){u32 p[]={(u32)face,(u32)func,(u32)ref,(u32)mask};emit_iv(76,(i32 *)p,4);}
@@ -588,6 +888,10 @@ int glVertexAttribPointerBounds(void) { static int seen; if(!seen){seen=1;const 
 extern int strcmp(const char *,const char *);
 void *eglGetProcAddress(const char *n)
 {
+#ifdef GLBRIDGE_MH2P_SCREEN
+    if (!strcmp(n, "glGetStringi")) return (void *)&glGetStringi;
+    if (!strcmp(n, "glProgramBinary")) return (void *)&glProgramBinary;
+#endif
     if (!strcmp(n,"eglGetSystemTimeFrequencyNV")) return (void *)&eglGetSystemTimeFrequencyNV;
     if (!strcmp(n,"eglGetSystemTimeNV")) return (void *)&eglGetSystemTimeNV;
     if (!strcmp(n,"eglCreateImageKHR")) return (void *)&eglCreateImageKHR;
@@ -601,6 +905,7 @@ void *eglGetProcAddress(const char *n)
     if (!strcmp(n,"eglDestroySurface")) return (void *)&eglDestroySurface;
     if (!strcmp(n,"eglGetConfigAttrib")) return (void *)&eglGetConfigAttrib;
     if (!strcmp(n,"eglGetConfigs")) return (void *)&eglGetConfigs;
+    if (!strcmp(n,"eglCreatePixmapSurface")) return (void *)&eglCreatePixmapSurface;
     if (!strcmp(n,"eglGetCurrentContext")) return (void *)&eglGetCurrentContext;
     if (!strcmp(n,"eglGetCurrentDisplay")) return (void *)&eglGetCurrentDisplay;
     if (!strcmp(n,"eglGetCurrentSurface")) return (void *)&eglGetCurrentSurface;

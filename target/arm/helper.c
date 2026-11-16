@@ -519,8 +519,14 @@ static void contextidr_write(CPUARMState *env, const ARMCPRegInfo *ri,
          * For VMSA (when not using the LPAE long descriptor page table
          * format) this register includes the ASID, so do a TLB flush.
          * For PMSA it is purely a process ID and no action is needed.
+         * The tag names both security states' ASIDs.
          */
-        tlb_flush(CPU(cpu));
+        raw_write(env, ri, value);
+        tlb_flush_asid_switch(CPU(cpu),
+                              (1ULL << 63) |
+                              (env->cp15.contextidr_s & 0xff) << 8 |
+                              (env->cp15.contextidr_ns & 0xff));
+        return;
     }
     raw_write(env, ri, value);
 }
@@ -2978,7 +2984,15 @@ static void vmsa_ttbr_write(CPUARMState *env, const ARMCPRegInfo *ri,
     if (cpreg_field_type(ri) == MO_64 &&
         extract64(raw_read(env, ri) ^ value, 48, 16) != 0) {
         ARMCPU *cpu = env_archcpu(env);
-        tlb_flush(CPU(cpu));
+
+        /* The tag names every EL1/EL3 TTBR ASID, whichever is active. */
+        raw_write(env, ri, value);
+        tlb_flush_asid_switch(CPU(cpu),
+                              extract64(env->cp15.ttbr0_el[1], 48, 16) |
+                              extract64(env->cp15.ttbr1_el[1], 48, 16) << 16 |
+                              extract64(env->cp15.ttbr0_el[3], 48, 16) << 32 |
+                              extract64(env->cp15.ttbr1_el[3], 48, 16) << 48);
+        return;
     }
     raw_write(env, ri, value);
 }

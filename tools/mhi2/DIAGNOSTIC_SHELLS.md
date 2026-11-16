@@ -185,5 +185,5 @@ Original JXE SHA-256:
 | Audi P5089 | `6aae98bbbcdd68b03fef4499d31a90205dcf9954459f3ef9a3df02ee937b4423` |
 | VW K3342 | `f46290b4a33b98d957170f6207073ad329316902a87cd4c27da4168548ad911a` |
 
-Local detailed analysis and logs are under
-`/home/iscle/mhi2-audi-port/analysis/diagnostic-shells/`.
+Detailed analysis and logs remain in the private `analysis/diagnostic-shells/`
+directory and are not distributed.

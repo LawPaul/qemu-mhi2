@@ -31,12 +31,85 @@
 #include "qemu/main-loop.h"
 #include "qemu/notify.h"
 #include "qemu/guest-random.h"
+#include "qemu/error-report.h"
+#include "qemu/cutils.h"
 #include "exec/cpu-common.h"
 #include "accel/tcg/cpu-loop.h"
 #include "tcg/startup.h"
 #include "tcg-accel-ops.h"
 #include "tcg-accel-ops-rr.h"
 #include "tcg-accel-ops-icount.h"
+
+enum {
+    RR_PROFILE_OTHER,
+    RR_PROFILE_IDLE,
+    RR_PROFILE_EXEC,
+    RR_PROFILE_PHASES,
+};
+
+typedef struct RRProfile {
+    bool enabled;
+    unsigned phase;
+    int64_t start, last_wall, last_cpu, guest_start, insns_start;
+    int64_t wall[RR_PROFILE_PHASES], cpu[RR_PROFILE_PHASES];
+    uint64_t calls[RR_PROFILE_PHASES], halts;
+} RRProfile;
+
+static int64_t rr_profile_cpu_clock(void)
+{
+#ifdef CLOCK_THREAD_CPUTIME_ID
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts)) {
+        error_report("TCG_RR_PROFILE: thread CPU clock: %s", strerror(errno));
+        abort();
+    }
+    return ts.tv_sec * NANOSECONDS_PER_SECOND + ts.tv_nsec;
+#else
+    error_report("TCG_RR_PROFILE requires a thread CPU clock");
+    abort();
+#endif
+}
+
+static void rr_profile_phase(RRProfile *p, unsigned next)
+{
+    int64_t wall, cpu;
+
+    if (!p->enabled) {
+        return;
+    }
+    wall = get_clock();
+    cpu = rr_profile_cpu_clock();
+    p->wall[p->phase] += wall - p->last_wall;
+    p->cpu[p->phase] += cpu - p->last_cpu;
+    p->last_wall = wall;
+    p->last_cpu = cpu;
+    p->phase = next;
+    p->calls[next]++;
+    if (next == RR_PROFILE_IDLE &&
+        wall - p->start >= 10 * NANOSECONDS_PER_SECOND) {
+        int64_t guest = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        int64_t insns = icount_enabled() ? icount_get_raw() : 0;
+
+        info_report("tcg-rr profile: wall=%.6fs guest=%.6fs insns=%" PRId64
+                    " other=%.6f/%.6fs idle=%.6f/%.6fs"
+                    " exec=%.6f/%.6fs calls=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                    " halts=%" PRIu64,
+                    (wall - p->start) / 1e9, (guest - p->guest_start) / 1e9,
+                    insns - p->insns_start,
+                    p->wall[0] / 1e9, p->cpu[0] / 1e9,
+                    p->wall[1] / 1e9, p->cpu[1] / 1e9,
+                    p->wall[2] / 1e9, p->cpu[2] / 1e9,
+                    p->calls[0], p->calls[1], p->calls[2], p->halts);
+        p->start = wall;
+        p->guest_start = guest;
+        p->insns_start = insns;
+        memset(p->wall, 0, sizeof(p->wall));
+        memset(p->cpu, 0, sizeof(p->cpu));
+        memset(p->calls, 0, sizeof(p->calls));
+        p->halts = 0;
+    }
+}
 
 /* Kick all RR vCPUs */
 void rr_kick_vcpu_thread(CPUState *unused)
@@ -151,7 +224,7 @@ static void rr_force_rcu(Notifier *notify, void *data)
  * The CPU count is cached based on the CPU list generation ID to avoid
  * iterating the list every time.
  */
-static int rr_cpu_count(void)
+static int rr_cpu_count(unsigned first_cpu_weight)
 {
     static unsigned int last_gen_id = ~0;
     static int cpu_count;
@@ -164,6 +237,7 @@ static int rr_cpu_count(void)
         CPU_FOREACH(cpu) {
             ++cpu_count;
         }
+        cpu_count += first_cpu_weight - 1;
         last_gen_id = cpu_list_generation_id_get();
     }
 
@@ -182,6 +256,23 @@ static void *rr_cpu_thread_fn(void *arg)
 {
     Notifier force_rcu;
     CPUState *cpu = arg;
+    unsigned first_cpu_weight = 1;
+    const char *weight_option = g_getenv("TCG_RR_FIRST_CPU_WEIGHT");
+    if (weight_option) {
+        long weight;
+
+        if (!icount_enabled() ||
+            qemu_strtol(weight_option, NULL, 10, &weight) < 0 ||
+            weight < 1 || weight > 16) {
+            error_report("TCG_RR_FIRST_CPU_WEIGHT requires icount and an "
+                         "integer from 1 through 16");
+            exit(EXIT_FAILURE);
+        }
+        first_cpu_weight = weight;
+    }
+    RRProfile profile = {
+        .enabled = g_strcmp0(g_getenv("TCG_RR_PROFILE"), "1") == 0,
+    };
 
     assert(tcg_enabled());
     rcu_register_thread();
@@ -212,6 +303,13 @@ static void *rr_cpu_thread_fn(void *arg)
 
     cpu = first_cpu;
 
+    if (profile.enabled) {
+        profile.start = profile.last_wall = get_clock();
+        profile.last_cpu = rr_profile_cpu_clock();
+        profile.guest_start = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        profile.insns_start = icount_enabled() ? icount_get_raw() : 0;
+    }
+
     while (1) {
         /* Only used for icount_enabled() */
         int64_t cpu_budget = 0;
@@ -233,7 +331,9 @@ static void *rr_cpu_thread_fn(void *arg)
             qemu_notify_event();
         }
 
+        rr_profile_phase(&profile, RR_PROFILE_IDLE);
         rr_wait_io_event();
+        rr_profile_phase(&profile, RR_PROFILE_OTHER);
         rr_deal_with_unplugged_cpus();
 
         bql_unlock();
@@ -241,7 +341,7 @@ static void *rr_cpu_thread_fn(void *arg)
         bql_lock();
 
         if (icount_enabled()) {
-            int cpu_count = rr_cpu_count();
+            int cpu_count = rr_cpu_count(first_cpu_weight);
 
             /* Account partial waits to QEMU_CLOCK_VIRTUAL.  */
             icount_account_warp_timer();
@@ -281,9 +381,16 @@ static void *rr_cpu_thread_fn(void *arg)
 
                 bql_unlock();
                 if (icount_enabled()) {
-                    icount_prepare_for_run(cpu, cpu_budget);
+                    icount_prepare_for_run(
+                        cpu, cpu_budget * (cpu == first_cpu ?
+                                           first_cpu_weight : 1));
                 }
+                rr_profile_phase(&profile, RR_PROFILE_EXEC);
                 excp = tcg_cpu_exec(cpu);
+                rr_profile_phase(&profile, RR_PROFILE_OTHER);
+                if (profile.enabled && excp == EXCP_HLT) {
+                    profile.halts++;
+                }
                 if (icount_enabled()) {
                     icount_process_data(cpu);
                 }

@@ -50,8 +50,8 @@ package version metadata can supply some software facts; it cannot safely stand
 in for an arbitrary vehicle's installed equipment or unit-specific identity.
 Individual ownership of all missing SWDL DSIs was not verified in this pass.
 
-Evidence and recovered classes:
-`/home/iscle/Downloads/mhi2-analysis/qemu/protocol-analysis/menu-data/`.
+Evidence and recovered classes were retained privately under
+`protocol-analysis/menu-data/`; those assets are not distributed.
 The saved `user-session-console.log` includes SWDL failures around lines
 8433–8440, 8734 and 9107; RCC persistence timeouts around 12666–12667; and
 empty identification fields at 13250. The original binaries were not patched.

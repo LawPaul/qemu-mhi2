@@ -37,6 +37,7 @@ tests = {
   'test-rcu-slist': [],
   'test-qdist': [],
   'test-qht': [],
+  'test-tb-hash': [],
   'test-qtree': [],
   'test-bitops': [],
   'test-bitcnt': [],

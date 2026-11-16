@@ -31,6 +31,7 @@ chardev_ss = chardev_ss.apply({})
 
 system_ss.add(files(
     'msmouse.c',
+    'mh2p-rstp.c',
     'wctablet.c',
     'testdev.c'))
 

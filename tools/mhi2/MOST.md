@@ -7,7 +7,7 @@ below describe the earlier implementation and remain historical evidence.
 Start with the existing command:
 
 ```sh
-bash /home/iscle/qemu-mhi2/tools/mhi2/run_ui.sh
+bash tools/mhi2/run_ui.sh --firmware vw --media /path/to/prepared-vw-media
 ```
 
 The **Virtual Cockpit** button opens a separate video window. It shows received
@@ -57,7 +57,7 @@ running receiver produced an 800×400 frame. Replaying the same finite stream
 resets its timestamps/counters, so FFmpeg reports discontinuities at replay
 boundaries. `most-test.json` and `most-live-*` retain that evidence.
 
-Evidence is in `/home/iscle/Downloads/mhi2-analysis/qemu/evidence-ui/`:
+Historical evidence was retained in a private `evidence-ui/` directory:
 `mhi2-most-blocks.bin`, `mhi2-native-captured.ts`, `mhi2-native-captured.png`.
 This is a transport test using a generated blue video, not proof of the native
 navigation producer. The driver is analyzed in the existing

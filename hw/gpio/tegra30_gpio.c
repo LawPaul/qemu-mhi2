@@ -254,6 +254,12 @@ static void tegra30_gpio_reset(DeviceState *dev)
     memset(s->int_sta, 0, sizeof(s->int_sta));
     memset(s->int_enb, 0, sizeof(s->int_enb));
     memset(s->int_lvl, 0, sizeof(s->int_lvl));
+    for (int gpio = 0; gpio < TEGRA30_GPIO_NR_GPIOS; gpio++) {
+        qemu_set_irq(s->output[gpio], 0);
+    }
+    for (int bank = 0; bank < TEGRA30_GPIO_BANKS; bank++) {
+        tegra30_gpio_update_bank(s, bank);
+    }
 }
 
 static void tegra30_gpio_init(Object *obj)

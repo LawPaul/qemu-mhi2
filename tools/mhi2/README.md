@@ -1,13 +1,14 @@
 # MHI2 Tegra3 emulation
 
 Upstream QEMU `81ce3a87737aa50716c42db8886082d12783e0a1` was merged into
-`mhi2-mainline-boot` in `/home/iscle/qemu-mhi2`. The original mounted checkout
+the historical `mhi2-mainline-boot` branch. The original source
 and firmware captures have not been modified.
 
 For a new computer, start with the [macOS setup and boot guide](../../README.md).
 It covers dependencies, the bootstrap download, and separate build and
 launch commands for Audi A3, Volkswagen and Porsche firmware.
-The workspace-specific commands below describe the older VW setup.
+The commands below describe the older VW diagnostic setup. Paths are
+placeholders for user-supplied assets, not bundled media.
 
 See [LSD diagnostic shells](DIAGNOSTIC_SHELLS.md) for the built-in COMM Doctor,
 Java Trace Terminal, and production trace-server configuration.
@@ -17,7 +18,7 @@ Java Trace Terminal, and production trace-server configuration.
 For the interactive UI, launch the prepared experimental media and viewer together:
 
 ```sh
-bash /home/iscle/qemu-mhi2/tools/mhi2/run_ui.sh
+bash tools/mhi2/run_ui.sh --firmware vw --media /path/to/prepared-vw-media
 ```
 
 The UI defaults to English. The viewer provides touch and the Volkswagen side
@@ -32,8 +33,7 @@ startup with a diagnostic. See [MOST.md](MOST.md) for device selection and tests
 For the native serial-console experiment:
 
 ```sh
-/home/iscle/qemu-mhi2/tools/mhi2/run.sh \
-  /home/iscle/Downloads/mhi2-analysis/qemu/k3342-70
+bash tools/mhi2/run.sh /path/to/private-media/k3342-70
 ```
 
 UART D is the console. Ctrl-A C switches to the QEMU monitor; Ctrl-A X exits.
@@ -61,7 +61,7 @@ and accepts production RCC key-panel touch events.
 
 The original prepared disk lacked the data partition layout expected by fstab.
 `create_emmc.py` builds that layout with the exact app partition size. The local
-`/home/iscle/Downloads/mhi2-analysis/qemu/emmc-full.raw` has all eleven blank
+private `emmc-full.raw` has all eleven blank
 partitions formatted by the firmware's own `mkqnx6fs`; normal startup confirms
 that they mount. Navigation/map data is not provided by those blank partitions.
 
@@ -85,14 +85,17 @@ missing vehicle and companion services still limit other applications.
 ## Rebuild
 
 ```sh
-cd /home/iscle/qemu-mhi2
-./configure --target-list=arm-softmmu --disable-docs --disable-sdl \
+# From the checkout root, configure in a new directory:
+SOURCE="$PWD"
+mkdir -p /path/to/new-build
+cd /path/to/new-build
+"$SOURCE/configure" --target-list=arm-softmmu --disable-docs --disable-sdl \
   --disable-gtk --disable-fuse --disable-werror --disable-download
-ninja -C build -j12 qemu-system-arm
+ninja -j4 qemu-system-arm
 ```
 
-The local copy includes the previously available softfloat/testfloat/keycodemapdb
-subprojects, so configuration does not need to fetch them.
+`--disable-download` requires the pinned build subprojects to be available
+already. See the main guide for portable dependency preparation.
 
 ## Reproduce the emulation images
 
@@ -100,7 +103,7 @@ subprojects, so configuration does not need to fetch them.
 
 ```sh
 python3 tools/mhi2/prepare.py \
-  --extracted /home/iscle/Downloads/mhi2-analysis/extracted \
+  --extracted /path/to/private-extracted-update \
   --base-nor /path/to/mmx_fs0_k2589 \
   --base-iram /path/to/tegra3_iram.bin \
   --base-emmc /path/to/emmc_v2.img \
@@ -138,13 +141,14 @@ Sources used:
 
 * [Linux Tegra30 device tree](https://github.com/torvalds/linux/blob/master/arch/arm/boot/dts/nvidia/tegra30.dtsi): memory map and UART interrupt wiring.
 * [NVIDIA T30 register definitions](https://github.com/Project-Google-Tango/vendor_nvidia_jxd_src/tree/master/tegra/hwinc/t30): CAR reset values and peripheral layouts; also available in the original mib directory.
-* Firmware disassembly in `/home/iscle/Downloads/mhi2-analysis/ghidra/`: boot addresses, BCT vendor CMAC records, BIT status, QNX startup and userspace scripts.
+* Private firmware analysis: boot addresses, BCT vendor CMAC records, BIT
+  status, QNX startup and userspace scripts. These assets are not distributed.
 
 ## Validation
 
 ```sh
 python3 tools/mhi2/check_boot.py \
-  /home/iscle/Downloads/mhi2-analysis/qemu/k3342-70 \
+  /path/to/private-media/k3342-70 \
   --output /tmp/mhi2-checks
 ```
 
@@ -259,7 +263,7 @@ cc -O2 tools/mhi2/glforward/host/check_blending.c -o /tmp/mhi2-check-blending -l
 
 
 Earlier speech bring-up evidence is in
-`/home/iscle/Downloads/mhi2-analysis/qemu/evidence-speech-startup/`.
+the private `evidence-speech-startup/` capture directory (not distributed).
 Navigation DSI registration occurs around 2:41 guest uptime, versus the previous
 4:57 after the speech timeout. Both native speech engines report ready around
 3:00. The validation captures 21.664 seconds of nonzero native prompt PCM,

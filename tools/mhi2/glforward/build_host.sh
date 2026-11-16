@@ -9,4 +9,4 @@ mesa_config=$(pkg-config --cflags --libs egl glesv2 libavcodec libavutil libswsc
 read -r -a mesa_flags <<< "$mesa_config"
 avcodec_libdir=$(pkg-config --variable=libdir libavcodec)
 mkdir -p "$(dirname "$out")"
-"${CC:-cc}" -O2 "$source" -o "$out" "${mesa_flags[@]}" "-Wl,-rpath,$avcodec_libdir" -pthread
+"${CC:-cc}" -O2 "$source" -o "$out" "${mesa_flags[@]}" "-Wl,-rpath,$avcodec_libdir" -pthread -lm

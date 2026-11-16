@@ -49,6 +49,7 @@ typedef struct USBDWC3 {
     struct {
         uint8_t     mode;
         uint32_t    dwc_usb3_user;
+        bool        usb2_utmi;
     } cfg;
 
 } USBDWC3;

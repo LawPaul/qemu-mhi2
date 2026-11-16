@@ -460,3 +460,14 @@ launch_update_write(void) ""
 vmlaunch_reset_enter(void) ""
 vm_launchupdate_finalize(void) ""
 restore_host_x86_igvm(void) ""
+
+# mh2p_pcie_config.c
+mh2p_pcie_rpc(unsigned op, uint32_t address, unsigned size, uint32_t value, uint32_t status, int64_t host_ns) "op=%u address=0x%x size=%u value=0x%x status=%u host_ns=%" PRId64
+
+# glbridge.c
+glbridge_surface_write(uint64_t length, uint32_t status) "length=%" PRIu64 " status=%u"
+glbridge_surface_refresh(uint64_t length, uint32_t status) "length=%" PRIu64 " status=%u"
+glbridge_surface_fallback(uint64_t reason) "reason=0x%" PRIx64
+glbridge_surface_mapping(uint32_t runs, uint32_t mode) "runs=%u mode=%u"
+glbridge_image_cache(uint32_t pixels, uint32_t native, uint64_t total, uint32_t entries) "pixels=%u native=%u total=%" PRIu64 " entries=%u"
+glbridge_image_reuse(uint32_t bytes) "bytes=%u"
